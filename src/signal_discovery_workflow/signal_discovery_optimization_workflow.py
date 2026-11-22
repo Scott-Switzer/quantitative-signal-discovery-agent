@@ -45,9 +45,11 @@ from .llm_utils import NO_THINK_INSTRUCTION, extract_json_array, extract_respons
 from .signal_code_generator import generate_signal_code
 from .signal_evaluator import (
     compute_forward_returns,
+    compute_ic_split,
     compute_rank_ic,
     execute_signal_code,
     extract_code_from_response,
+    load_sector_map,
     load_stock_data,
 )
 from .signal_generator import generate_signal_json, load_calculator_operators
@@ -166,6 +168,20 @@ def _format_workflow_result(
         if ic_results.get(k) is not None
     }
 
+    # Out-of-sample split and sector neutralization diagnostics. The headline
+    # "metrics" above are the TEST (out-of-sample) IC, sector-neutralized when
+    # a map is present; these nested blocks show the train and full-history
+    # ICs alongside so overfitting (and the neutralization effect) is visible.
+    evaluation = {
+        "train_end_date": getattr(config, "train_end_date", None),
+        "test_start_date": getattr(config, "test_start_date", None),
+        "sector_neutralized": ic_results.get("sector_neutralized"),
+        "sector_coverage": ic_results.get("sector_coverage"),
+    }
+    for key in ("ic_train", "ic_test", "ic_full", "ic_raw_train", "ic_raw_test", "ic_raw_full"):
+        if ic_results.get(key):
+            evaluation[key] = ic_results[key]
+
     payload = {
         "status": status,
         "headline": _STATUS_HEADLINE.get(status, status),
@@ -178,6 +194,7 @@ def _format_workflow_result(
             "p_value_threshold": config.p_value_threshold,
         },
         "metrics": metrics,
+        "evaluation": evaluation,
         "signals": signals_summary,
         "saved_path": saved_path,
     }
@@ -229,6 +246,9 @@ class SignalOptimizerConfig(FunctionBaseConfig, name="signal_optimizer"):
     max_iterations: int = Field(default=3, description="Max optimization attempts")
     num_signals: int = Field(default=5, description="Signals per iteration")
     forward_periods: int = Field(default=5, description="Forward return periods")
+    train_end_date: str = Field(default="2020-12-31", description="Last date of the train (in-sample) period, YYYY-MM-DD")
+    test_start_date: str = Field(default="2021-01-01", description="First date of the test (out-of-sample) period, YYYY-MM-DD")
+    sector_neutralize: bool = Field(default=True, description="Compute sector-neutralized Rank IC when a sector map is present")
     save_results: bool = Field(default=True, description="Save results to disk")
 
 
@@ -250,10 +270,26 @@ async def signal_optimizer_function(config: SignalOptimizerConfig, builder: Buil
     operators = load_calculator_operators()
     stock_data = load_stock_data()
 
+    # Sector map for the sector-neutralized IC. Falls back to None (raw IC)
+    # when the config disables it or the map file is missing.
+    sector_map = load_sector_map() if config.sector_neutralize else None
+    sector_coverage = None
+    if sector_map is not None and stock_data.get("Close") is not None:
+        universe = list(stock_data["Close"].columns)
+        known = sum(1 for t in universe if sector_map.get(t) not in (None, "Unknown"))
+        sector_coverage = {"mapped": known, "total": len(universe)}
+        logger.info(f"Sector neutralization active: {known}/{len(universe)} tickers mapped")
+
     # ---- per-step helpers (close over the LLMs and shared state) ----
 
     def evaluate_ic(signal_code: str) -> dict[str, Any]:
-        """Run the signal code and compute its rank IC against forward returns."""
+        """Run the signal code and compute its rank IC against forward returns.
+
+        The headline IC is the sector-neutralized TEST (out-of-sample) IC;
+        the train and full-history ICs are nested diagnostics in the result
+        so overfitting is visible. Acceptance (|IC| >= threshold, p <= 0.05)
+        therefore uses the out-of-sample number.
+        """
         if not stock_data:
             return {"error": "No stock data", "mean_ic": None}
 
@@ -276,8 +312,16 @@ async def signal_optimizer_function(config: SignalOptimizerConfig, builder: Buil
         with np.errstate(invalid="ignore", divide="ignore"), warnings.catch_warnings():
             warnings.filterwarnings("ignore", category=RuntimeWarning)
             forward_returns = compute_forward_returns(close, periods=config.forward_periods)
-            ic_results = compute_rank_ic(signal_values, forward_returns)
+            ic_results = compute_ic_split(
+                signal_values,
+                forward_returns,
+                train_end_date=config.train_end_date,
+                test_start_date=config.test_start_date,
+                sector_map=sector_map,
+            )
         ic_results["selected_signal"] = selected_signal
+        if sector_coverage is not None:
+            ic_results["sector_coverage"] = sector_coverage
         return ic_results
 
     def is_acceptable(ic_results: dict) -> bool:
@@ -302,11 +346,14 @@ async def signal_optimizer_function(config: SignalOptimizerConfig, builder: Buil
         p_value = ic_results.get("p_value")
         mean_ic_str = f"{mean_ic:.4f}" if mean_ic is not None else "N/A"
         p_value_str = f"{p_value:.4f}" if p_value is not None else "N/A"
+        train_ic = (ic_results.get("ic_train") or {}).get("mean_ic")
+        train_ic_str = f"{train_ic:.4f}" if train_ic is not None else "N/A"
         error = ic_results.get("error", "")
         error_line = f"- Error: {error}\n" if error else ""
 
         prompt = f"""Iteration {iteration} results:
-- Mean IC: {mean_ic_str} (target >= {config.ic_threshold})
+- Mean IC (TEST, out-of-sample): {mean_ic_str} (target >= {config.ic_threshold})
+- Mean IC (TRAIN, in-sample): {train_ic_str} (a large train/test gap means overfitting)
 - P-value: {p_value_str} (target <= {config.p_value_threshold})
 {error_line}
 SIGNALS TRIED:

@@ -62,4 +62,12 @@ workflow:
   max_iterations: 3
   num_signals: 2
   forward_periods: 5
+  # Out-of-sample split: the headline IC and the acceptance decision use the
+  # TEST period only. Train IC is reported alongside so overfitting is visible.
+  train_end_date: "2020-12-31"
+  test_start_date: "2021-01-01"
+  # Sector-neutralized Rank IC (demean signal and returns by GICS sector per
+  # date) when data/sp500/sectors.csv is present. Falls back to the raw IC
+  # when the map is missing.
+  sector_neutralize: true
   save_results: true

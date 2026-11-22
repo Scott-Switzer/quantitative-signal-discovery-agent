@@ -7,6 +7,9 @@ result*.json
 .venv/
 .vscode/
 src/signal_discovery_workflow/data/sp500/*.csv
+# Exception: the GICS sector map is a small static reference file (not bulk
+# data) and is required for sector-neutralized IC. Keep it tracked.
+!src/signal_discovery_workflow/data/sp500/sectors.csv
 
 # Secrets — never commit API keys.
 .env

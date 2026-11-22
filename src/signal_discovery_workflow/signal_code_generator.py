@@ -82,6 +82,51 @@ DATA_FIELD_ALIASES = {
     "low_price": "Low",
     "trading_volume": "Volume",
     "volume_traded": "Volume",
+    # Fundamental aliases (canonical names are Revenue, NetIncome,
+    # OperatingIncome, Assets, Liabilities, Equity, Cash, LongTermDebt).
+    "net_income": "NetIncome",
+    "netincome": "NetIncome",
+    "operating_income": "OperatingIncome",
+    "operatingincome": "OperatingIncome",
+    "ebit": "OperatingIncome",
+    "total_assets": "Assets",
+    "total_liabilities": "Liabilities",
+    "stockholders_equity": "Equity",
+    "shareholders_equity": "Equity",
+    "shareholder_equity": "Equity",
+    "stockholder_equity": "Equity",
+    "total_equity": "Equity",
+    "cash_and_equivalents": "Cash",
+    "cash_equivalents": "Cash",
+    "long_term_debt": "LongTermDebt",
+    "longtermdebt": "LongTermDebt",
+    "total_debt": "LongTermDebt",
+    # Ratio aliases (canonical names are ROE, ROA, OperatingMargin,
+    # NetMargin, RevenueGrowth, NetIncomeGrowth, DebtToEquity,
+    # LongTermDebtToEquity, EquityToAssets, CashToAssets).
+    "roe": "ROE",
+    "return_on_equity": "ROE",
+    "returnonequity": "ROE",
+    "roa": "ROA",
+    "return_on_assets": "ROA",
+    "returnonassets": "ROA",
+    "operating_margin": "OperatingMargin",
+    "operatingmargin": "OperatingMargin",
+    "net_margin": "NetMargin",
+    "netmargin": "NetMargin",
+    "revenue_growth": "RevenueGrowth",
+    "revenuegrowth": "RevenueGrowth",
+    "net_income_growth": "NetIncomeGrowth",
+    "netincomegrowth": "NetIncomeGrowth",
+    "debt_to_equity": "DebtToEquity",
+    "debttoequity": "DebtToEquity",
+    "debt_equity": "DebtToEquity",
+    "long_term_debt_to_equity": "LongTermDebtToEquity",
+    "longtermdebttoequity": "LongTermDebtToEquity",
+    "equity_to_assets": "EquityToAssets",
+    "equitytoassets": "EquityToAssets",
+    "cash_to_assets": "CashToAssets",
+    "cashtoassets": "CashToAssets",
 }
 
 
@@ -98,8 +143,36 @@ def _python_function_name(name: str | None, index: int) -> str:
 
 
 def _infer_fields_from_formula(formula: str) -> list[str]:
-    """Detect which OHLCV fields the formula references."""
-    return [f for f in ("Open", "Close", "High", "Low", "Volume") if re.search(rf"\b{f}\b", formula)]
+    """Detect which OHLCV, fundamental, and ratio fields the formula references."""
+    return [
+        f
+        for f in (
+            "Open",
+            "Close",
+            "High",
+            "Low",
+            "Volume",
+            "Revenue",
+            "NetIncome",
+            "OperatingIncome",
+            "Assets",
+            "Liabilities",
+            "Equity",
+            "Cash",
+            "LongTermDebt",
+            "ROE",
+            "ROA",
+            "OperatingMargin",
+            "NetMargin",
+            "RevenueGrowth",
+            "NetIncomeGrowth",
+            "DebtToEquity",
+            "LongTermDebtToEquity",
+            "EquityToAssets",
+            "CashToAssets",
+        )
+        if re.search(rf"\b{f}\b", formula)
+    ]
 
 
 def _normalize_data_field_names(text: str) -> str:
@@ -157,6 +230,38 @@ def _check_formula_arity(formula: str, arities: dict[str, tuple[int, int]]) -> s
     return None
 
 
+def _check_formula_operators(formula: str, arities: dict[str, tuple[int, int]]) -> str | None:
+    """
+    Statically verify every operator call in a formula names a real operator.
+
+    The arity check silently skips operators it does not recognize, so a
+    hallucinated name like ``Rank_Exp`` would otherwise slip through to code
+    generation (its code is never inlined) and only fail at runtime as a
+    ``NameError``, wasting the signal slot. This check catches it at parse
+    time so the signal is rejected with a clear message and the generator can
+    self-correct on the next iteration.
+
+    Returns ``None`` if every called name is a known operator (or the formula
+    is unparseable, in which case runtime catches it). Returns a
+    human-readable error string naming the unknown operator(s) otherwise.
+    """
+    try:
+        tree = ast.parse(formula, mode="eval")
+    except SyntaxError:
+        return None  # not Python — let downstream parser deal with it
+
+    unknown: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
+            continue
+        name = node.func.id
+        if name not in arities and name not in unknown:
+            unknown.append(name)
+    if not unknown:
+        return None
+    return f"unknown operator(s): {', '.join(unknown)}"
+
+
 def parse_signal_specs_with_errors(
     signal_json: str, valid_operators: Iterable[str]
 ) -> tuple[list[dict], list[str]]:
@@ -208,6 +313,11 @@ def parse_signal_specs_with_errors(
             sanitize_unicode(signal["formula"]).strip(), valid_operators
         )
         formula = _normalize_data_field_names(formula)
+
+        operator_error = _check_formula_operators(formula, arities)
+        if operator_error:
+            skipped.append(f"#{idx} ({signal.get('name', '?')}: {operator_error})")
+            continue
 
         arity_error = _check_formula_arity(formula, arities)
         if arity_error:

@@ -39,6 +39,24 @@
                 "data_fields_used": ["Volume"],
                 "operators_used": ["Div", "TS_Mean"],
                 "lookback_periods": [20]
+            },
+            {
+                "name": "Return on Equity",
+                "formula": "Div(NetIncome, Equity)",
+                "meaning": "Quarterly net income divided by stockholders equity (ROE), point-in-time fundamental profitability; ranks companies by how efficiently they earn on equity",
+                "category": "quality",
+                "data_fields_used": ["NetIncome", "Equity"],
+                "operators_used": ["Div"],
+                "lookback_periods": []
+            },
+            {
+                "name": "Revenue Growth Momentum",
+                "formula": "TS_Mean(RevenueGrowth, 20)",
+                "meaning": "20-day average of pre-computed year-over-year revenue growth (point-in-time ratio panel), ranking companies by sustained revenue expansion",
+                "category": "quality",
+                "data_fields_used": ["RevenueGrowth"],
+                "operators_used": ["TS_Mean"],
+                "lookback_periods": [20]
             }
         ]
     },

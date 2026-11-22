@@ -37,6 +37,7 @@ logger = logging.getLogger(__name__)
 
 DATA_DIR = Path(__file__).parent / "data" / "sp500"
 CALCULATOR_PATH = Path(__file__).parent / "template" / "calculator.json"
+SECTORS_PATH = DATA_DIR / "sectors.csv"
 
 
 def _load_all_operators() -> dict[str, callable]:
@@ -90,9 +91,42 @@ def get_operator_arities() -> dict[str, tuple[int, int]]:
 
 
 def load_stock_data() -> dict[str, pd.DataFrame]:
-    """Load all available stock price-volume data from CSV files."""
+    """Load all available stock price-volume and fundamental data from CSV files.
+
+    Fundamental CSVs are optional: if a file is missing, a warning is logged
+    and loading continues, so the OHLCV-only setup still works.
+    """
     data = {}
-    data_files = ["Open", "Close", "High", "Low", "Volume"]
+    # Fundamental fields. Keep in sync with FUNDAMENTAL_FIELDS in
+    # signal_generator.py. Raw reported values, point-in-time, forward-filled
+    # from each filing's FILED date (see the fundamentals README).
+    FUNDAMENTAL_FIELDS = [
+        "Revenue",
+        "NetIncome",
+        "OperatingIncome",
+        "Assets",
+        "Liabilities",
+        "Equity",
+        "Cash",
+        "LongTermDebt",
+    ]
+    # Pre-computed ratio fields. Keep in sync with RATIO_FIELDS in
+    # signal_generator.py. Derived from the raw fundamentals above, so they
+    # inherit the point-in-time property. A ratio is defined only where its
+    # denominator is positive and non-missing.
+    RATIO_FIELDS = [
+        "ROE",
+        "ROA",
+        "OperatingMargin",
+        "NetMargin",
+        "RevenueGrowth",
+        "NetIncomeGrowth",
+        "DebtToEquity",
+        "LongTermDebtToEquity",
+        "EquityToAssets",
+        "CashToAssets",
+    ]
+    data_files = ["Open", "Close", "High", "Low", "Volume"] + FUNDAMENTAL_FIELDS + RATIO_FIELDS
 
     for field in data_files:
         file_path = DATA_DIR / f"{field}.csv"
@@ -107,6 +141,67 @@ def load_stock_data() -> dict[str, pd.DataFrame]:
             logger.warning(f"Data file not found: {file_path}")
 
     return data
+
+
+def load_sector_map() -> dict[str, str] | None:
+    """Load the ticker -> GICS sector map from ``data/sp500/sectors.csv``.
+
+    Source: the ``datasets/s-and-p-500-companies`` constituents CSV (a mirror
+    of the Wikipedia "List of S&P 500 companies"), fetched 2026-11-22.
+    Coverage: 367 of the 392 tickers in the agent universe have a known
+    sector (93.6%). The 25 unmapped tickers (AVB, BBWI, BIO, BWA, CAG, CMA,
+    CPB, CTRA, EA, EMN, EQR, FMC, HOLX, IPG, K, KMX, LKQ, MHK, MKTX, MOH,
+    MTCH, POOL, RHI, TAP, TFX) are no longer in the current S&P 500 (removed,
+    acquired, or taken private) and are marked "Unknown" in the CSV; they are
+    excluded from the sector-neutralized IC. Three renamed tickers were mapped
+    through their current symbol: BK -> BNY, FI -> FISV, MMC -> MRSH.
+
+    Returns ``None`` (with a warning) if the file is missing or unreadable,
+    so callers can fall back to the raw (non-neutralized) IC.
+    """
+    if not SECTORS_PATH.exists():
+        logger.warning(f"Sector map not found: {SECTORS_PATH} (sector neutralization disabled)")
+        return None
+    try:
+        df = pd.read_csv(SECTORS_PATH, dtype=str)
+        mapping = {
+            str(row["ticker"]).strip(): str(row["sector"]).strip()
+            for _, row in df.iterrows()
+        }
+        known = sum(1 for v in mapping.values() if v and v != "Unknown")
+        logger.info(f"Loaded sector map: {known}/{len(mapping)} tickers with a known sector")
+        return mapping
+    except Exception as e:
+        logger.warning(f"Failed to load sector map: {e}")
+        return None
+
+
+def _sector_demean(
+    signal_row: pd.Series,
+    returns_row: pd.Series,
+    sector_map: dict[str, str],
+) -> tuple[pd.Series, pd.Series] | tuple[None, None]:
+    """Demean signal and returns by sector within one date's cross-section.
+
+    Both series share the same ticker index (the date's common tickers).
+    Tickers with sector "Unknown" (or absent from the map) are dropped.
+    Returns ``(demeaned_signal, demeaned_returns)``, or ``(None, None)`` if
+    fewer than 10 known-sector tickers or fewer than 2 distinct sectors are
+    present (not enough to neutralize meaningfully).
+    """
+    frame = pd.DataFrame(
+        {
+            "signal": signal_row,
+            "returns": returns_row,
+            "sector": [sector_map.get(t, "Unknown") for t in signal_row.index],
+        }
+    )
+    frame = frame[frame["sector"] != "Unknown"]
+    if len(frame) < 10 or frame["sector"].nunique() < 2:
+        return None, None
+    frame["signal"] = frame["signal"] - frame.groupby("sector")["signal"].transform("mean")
+    frame["returns"] = frame["returns"] - frame.groupby("sector")["returns"].transform("mean")
+    return frame["signal"], frame["returns"]
 
 
 def compute_forward_returns(close: pd.DataFrame, periods: int = 5) -> pd.DataFrame:
@@ -127,6 +222,7 @@ def compute_forward_returns(close: pd.DataFrame, periods: int = 5) -> pd.DataFra
 def compute_rank_ic(
     signal_values: pd.DataFrame,
     forward_returns: pd.DataFrame,
+    sector_map: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """
     Compute rank IC (Information Coefficient) between signal values and forward returns.
@@ -137,6 +233,12 @@ def compute_rank_ic(
     Args:
         signal_values: DataFrame of signal values (rows=dates, cols=stocks).
         forward_returns: DataFrame of forward returns (rows=dates, cols=stocks).
+        sector_map: Optional ``{ticker: GICS sector}`` mapping. When provided,
+            the signal values and forward returns are demeaned by sector
+            within each date's cross-section before the Spearman correlation,
+            so a sector bet does not look like a signal. Tickers with sector
+            "Unknown" (or absent from the map) are excluded from the
+            neutralized IC. When None, the raw (un-neutralized) IC is computed.
 
     Returns:
         Dictionary containing IC statistics.
@@ -173,8 +275,17 @@ def compute_rank_ic(
             if len(common) < 10:
                 continue
 
-            signal_vals = signal_row[common].values
-            return_vals = returns_row[common].values
+            signal_vals = signal_row[common]
+            return_vals = returns_row[common]
+
+            if sector_map is not None:
+                demeaned = _sector_demean(signal_vals, return_vals, sector_map)
+                if demeaned[0] is None:
+                    continue
+                signal_vals, return_vals = demeaned
+
+            signal_vals = signal_vals.values
+            return_vals = return_vals.values
 
             # Spearman correlation requires non-constant inputs.
             if np.std(signal_vals) < 1e-10 or np.std(return_vals) < 1e-10:
@@ -229,6 +340,57 @@ def compute_rank_ic(
         }
 
 
+def compute_ic_split(
+    signal_values: pd.DataFrame,
+    forward_returns: pd.DataFrame,
+    train_end_date: str,
+    test_start_date: str,
+    sector_map: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """Compute Rank IC on train, test, and full history.
+
+    The TEST (out-of-sample) IC is the headline: it is returned as the
+    top-level ``mean_ic`` / ``p_value`` / etc. so acceptance decisions use it.
+    The train and full ICs are nested diagnostics (``ic_train``,
+    ``ic_full``) so overfitting is visible. When a ``sector_map`` is given,
+    the headline is the sector-neutralized test IC and the raw (un-neutralized)
+    ICs are nested as ``ic_raw_*`` for comparison.
+
+    Args:
+        signal_values: DataFrame of signal values (rows=dates, cols=stocks).
+        forward_returns: DataFrame of forward returns (rows=dates, cols=stocks).
+        train_end_date: Last date of the train (in-sample) period, YYYY-MM-DD.
+        test_start_date: First date of the test (out-of-sample) period, YYYY-MM-DD.
+        sector_map: Optional ``{ticker: GICS sector}`` mapping for the
+            sector-neutralized IC. When None, the raw IC is used throughout.
+
+    Returns:
+        Dict with headline (test) IC fields plus nested ``ic_train``,
+        ``ic_test``, ``ic_full`` dicts (and ``ic_raw_train`` / ``ic_raw_test`` /
+        ``ic_raw_full`` when a sector map is given) and a
+        ``sector_neutralized`` flag.
+    """
+    train_sig = signal_values.loc[:train_end_date]
+    train_ret = forward_returns.loc[:train_end_date]
+    test_sig = signal_values.loc[test_start_date:]
+    test_ret = forward_returns.loc[test_start_date:]
+
+    train_ic = compute_rank_ic(train_sig, train_ret, sector_map=sector_map)
+    test_ic = compute_rank_ic(test_sig, test_ret, sector_map=sector_map)
+    full_ic = compute_rank_ic(signal_values, forward_returns, sector_map=sector_map)
+
+    result = dict(test_ic)  # headline = test IC (neutralized when a map is given)
+    result["sector_neutralized"] = sector_map is not None
+    result["ic_train"] = train_ic
+    result["ic_test"] = test_ic
+    result["ic_full"] = full_ic
+    if sector_map is not None:
+        result["ic_raw_train"] = compute_rank_ic(train_sig, train_ret)
+        result["ic_raw_test"] = compute_rank_ic(test_sig, test_ret)
+        result["ic_raw_full"] = compute_rank_ic(signal_values, forward_returns)
+    return result
+
+
 def extract_code_from_response(code_response: str) -> str:
     """Extract Python code from markdown code blocks, falling back to raw text."""
     code_blocks = re.findall(r"```python\n(.*?)```", code_response, re.DOTALL)
@@ -248,8 +410,30 @@ OPERATOR_NAMES = set(_OPERATOR_FUNCTIONS.keys())
 
 # Standard data field names. Order matters: when a signal function uses a
 # generic parameter name (e.g. `x`, `data`, `prices`), parameters are filled
-# positionally from this list.
-STANDARD_FIELDS = ["Close", "Volume", "High", "Low", "Open"]
+# positionally from this list. Fundamentals are appended after OHLCV so
+# positional fallback still prefers price/volume fields. Ratios are appended
+# after fundamentals.
+STANDARD_FIELDS = ["Close", "Volume", "High", "Low", "Open"] + [
+    "Revenue",
+    "NetIncome",
+    "OperatingIncome",
+    "Assets",
+    "Liabilities",
+    "Equity",
+    "Cash",
+    "LongTermDebt",
+] + [
+    "ROE",
+    "ROA",
+    "OperatingMargin",
+    "NetMargin",
+    "RevenueGrowth",
+    "NetIncomeGrowth",
+    "DebtToEquity",
+    "LongTermDebtToEquity",
+    "EquityToAssets",
+    "CashToAssets",
+]
 
 
 def _is_dataframe_param(p: inspect.Parameter) -> bool:

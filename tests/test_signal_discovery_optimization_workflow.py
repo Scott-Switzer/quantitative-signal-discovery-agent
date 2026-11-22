@@ -51,6 +51,49 @@ def test_format_workflow_result_summarizes_fenced_signal_json():
     ]
 
 
+def test_format_workflow_result_includes_evaluation_split():
+    """The payload carries the train/test/full ICs and the split dates."""
+    ic_results = {
+        "selected_signal": "signal_roe",
+        "mean_ic": 0.008,
+        "p_value": 0.01,
+        "num_periods": 1200,
+        "sector_neutralized": True,
+        "sector_coverage": {"mapped": 367, "total": 392},
+        "ic_train": {"mean_ic": 0.012, "p_value": 0.001, "num_periods": 1300},
+        "ic_test": {"mean_ic": 0.008, "p_value": 0.01, "num_periods": 1200},
+        "ic_full": {"mean_ic": 0.010, "p_value": 0.002, "num_periods": 2500},
+        "ic_raw_test": {"mean_ic": 0.015, "p_value": 0.001, "num_periods": 1200},
+    }
+    result = _format_workflow_result(
+        status="best_effort",
+        request="quality signals",
+        iteration=3,
+        total_iterations=3,
+        signal_json=_fenced_signal_json(),
+        ic_results=ic_results,
+        saved_path="/tmp/signal.json",
+        config=SimpleNamespace(
+            ic_threshold=0.02,
+            p_value_threshold=0.05,
+            train_end_date="2020-12-31",
+            test_start_date="2021-01-01",
+        ),
+    )
+    payload = json.loads(result)
+    evaluation = payload["evaluation"]
+    assert evaluation["train_end_date"] == "2020-12-31"
+    assert evaluation["test_start_date"] == "2021-01-01"
+    assert evaluation["sector_neutralized"] is True
+    assert evaluation["sector_coverage"] == {"mapped": 367, "total": 392}
+    assert evaluation["ic_train"]["mean_ic"] == 0.012
+    assert evaluation["ic_test"]["mean_ic"] == 0.008
+    assert evaluation["ic_full"]["mean_ic"] == 0.010
+    assert evaluation["ic_raw_test"]["mean_ic"] == 0.015
+    # Headline metrics are the test IC.
+    assert payload["metrics"]["mean_ic"] == 0.008
+
+
 def test_compose_feedback_summarizes_fenced_best_signal_json():
     feedback = _compose_feedback(
         advice="- Try a shorter lookback",

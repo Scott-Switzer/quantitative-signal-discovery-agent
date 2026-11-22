@@ -9,9 +9,11 @@ import pytest
 
 from signal_discovery_workflow.signal_evaluator import (
     compute_forward_returns,
+    compute_ic_split,
     compute_rank_ic,
     execute_signal_code,
     extract_code_from_response,
+    load_sector_map,
 )
 
 # ---------------------------------------------------------------------------
@@ -205,6 +207,120 @@ class TestComputeRankIC:
         )
         result = compute_rank_ic(signal, returns)
         assert result["num_periods"] > 0
+
+
+# ---------------------------------------------------------------------------
+# compute_ic_split — out-of-sample validation
+# ---------------------------------------------------------------------------
+
+class TestComputeICSplit:
+    def _make_signal_and_returns(self, n_dates=120, n_stocks=20, seed=0):
+        rng = np.random.default_rng(seed)
+        dates = pd.date_range("2020-01-01", periods=n_dates, freq="B")
+        tickers = [f"S{i:02d}" for i in range(n_stocks)]
+        returns = pd.DataFrame(rng.standard_normal((n_dates, n_stocks)), index=dates, columns=tickers)
+        return dates, tickers, returns
+
+    def test_reports_train_test_and_full(self):
+        _, _, returns = self._make_signal_and_returns()
+        result = compute_ic_split(returns, returns, "2020-03-31", "2020-04-01")
+        for key in ("ic_train", "ic_test", "ic_full"):
+            assert key in result
+            assert result[key]["mean_ic"] is not None
+            assert result[key]["num_periods"] > 0
+
+    def test_headline_is_test_ic(self):
+        """The top-level mean_ic must equal the test IC, not the train or full IC."""
+        _, _, returns = self._make_signal_and_returns()
+        result = compute_ic_split(returns, returns, "2020-03-31", "2020-04-01")
+        assert result["mean_ic"] == pytest.approx(result["ic_test"]["mean_ic"])
+        assert result["p_value"] == pytest.approx(result["ic_test"]["p_value"])
+        assert result["num_periods"] == result["ic_test"]["num_periods"]
+
+    def test_train_and_test_periods_do_not_overlap(self):
+        """Train periods end on train_end_date; test periods start on test_start_date."""
+        _, _, returns = self._make_signal_and_returns(n_dates=120)
+        result = compute_ic_split(returns, returns, "2020-03-31", "2020-04-01")
+        # Business days: 2020-01-01 to 2020-03-31 is ~65 days, 2020-04-01 onward ~55.
+        assert result["ic_train"]["num_periods"] + result["ic_test"]["num_periods"] <= 120
+        assert result["ic_train"]["num_periods"] > 0
+        assert result["ic_test"]["num_periods"] > 0
+
+    def test_empty_test_period_reports_none_headline(self):
+        """A test window with no dates gives a None headline IC (not a crash)."""
+        _, _, returns = self._make_signal_and_returns(n_dates=60)
+        result = compute_ic_split(returns, returns, "2020-03-31", "2030-01-01")
+        assert result["ic_test"]["num_periods"] == 0
+        assert result["mean_ic"] is None
+
+
+# ---------------------------------------------------------------------------
+# Sector neutralization
+# ---------------------------------------------------------------------------
+
+class TestSectorNeutralization:
+    def _make_sector_data(self, n_dates=60, seed=0):
+        """20 tickers in 2 sectors; the signal is a pure sector bet plus noise."""
+        rng = np.random.default_rng(seed)
+        dates = pd.date_range("2020-01-01", periods=n_dates, freq="B")
+        tickers = [f"S{i:02d}" for i in range(20)]
+        # Sector A tickers (S00-S09) get a +1 sector signal; sector B (S10-S19) get -1.
+        sector_signal = np.array([1.0] * 10 + [-1.0] * 10)
+        signal = pd.DataFrame(
+            np.tile(sector_signal, (n_dates, 1)) + rng.normal(0, 0.1, (n_dates, 20)),
+            index=dates, columns=tickers,
+        )
+        # Forward returns follow the same sector pattern (sector A outperforms).
+        sector_ret = np.array([0.02] * 10 + [-0.02] * 10)
+        returns = pd.DataFrame(
+            np.tile(sector_ret, (n_dates, 1)) + rng.normal(0, 0.01, (n_dates, 20)),
+            index=dates, columns=tickers,
+        )
+        sector_map = {f"S{i:02d}": ("SectorA" if i < 10 else "SectorB") for i in range(20)}
+        return signal, returns, sector_map
+
+    def test_sector_bet_ic_drops_after_neutralization(self):
+        """A pure sector bet has a high raw IC but near-zero sector-neutral IC."""
+        signal, returns, sector_map = self._make_sector_data()
+        raw = compute_rank_ic(signal, returns)
+        neutral = compute_rank_ic(signal, returns, sector_map=sector_map)
+        assert raw["mean_ic"] is not None and abs(raw["mean_ic"]) > 0.5
+        assert neutral["mean_ic"] is not None
+        assert abs(neutral["mean_ic"]) < abs(raw["mean_ic"])
+
+    def test_split_reports_raw_and_neutralized_test_ic(self):
+        signal, returns, sector_map = self._make_sector_data()
+        result = compute_ic_split(signal, returns, "2020-02-28", "2020-03-02", sector_map=sector_map)
+        assert result["sector_neutralized"] is True
+        assert result["ic_raw_test"]["mean_ic"] is not None
+        assert result["ic_test"]["mean_ic"] is not None
+        assert abs(result["ic_test"]["mean_ic"]) < abs(result["ic_raw_test"]["mean_ic"])
+
+    def test_unknown_sector_tickers_excluded(self):
+        """Tickers marked Unknown are dropped from the neutralized IC."""
+        signal, returns, sector_map = self._make_sector_data()
+        # Mark half the tickers Unknown; the neutralized IC must still compute
+        # from the remaining known-sector tickers.
+        partial_map = dict(sector_map)
+        for i in range(10, 20):
+            partial_map[f"S{i:02d}"] = "Unknown"
+        result = compute_rank_ic(signal, returns, sector_map=partial_map)
+        # Only sector A remains, a single sector, so demeaning zeroes it out.
+        assert result["num_periods"] == 0
+
+    def test_no_sector_map_gives_raw_ic(self):
+        signal, returns, _ = self._make_sector_data()
+        result = compute_rank_ic(signal, returns, sector_map=None)
+        assert result["mean_ic"] is not None and abs(result["mean_ic"]) > 0.5
+
+    def test_load_sector_map_reads_csv(self):
+        sector_map = load_sector_map()
+        assert sector_map is not None
+        assert len(sector_map) == 392
+        assert sector_map.get("AAPL") == "Information Technology"
+        assert sector_map.get("XOM") == "Energy"
+        known = sum(1 for v in sector_map.values() if v != "Unknown")
+        assert known == 367
 
 
 # ---------------------------------------------------------------------------

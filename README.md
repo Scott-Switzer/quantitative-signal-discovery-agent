@@ -17,6 +17,39 @@ The workflow uses a **closed-loop optimization** approach:
 4. If IC meets threshold → Accept and save
 5. If IC is poor → Generate optimization advice and retry
 
+## Fork notes (Scott-Switzer fork)
+
+This fork adds three structural fixes over upstream, plus fundamentals and
+ratio data fields (23 fields total: 5 OHLCV, 8 fundamentals, 10 ratios).
+
+1. **Operator enforcement.** A generated formula is validated against the
+   real operator list (`template/calculator.json`) at parse time
+   (`signal_code_generator.py`, `_check_formula_operators`). A formula using
+   a nonexistent operator (e.g. `Rank_Exp`) is rejected with a message naming
+   the invalid operator, and the rejection is fed back into the next
+   iteration so the generator self-corrects instead of wasting the slot.
+2. **Out-of-sample validation.** Evaluation is split into a train period and
+   a test period (`signal_evaluator.py`, `compute_ic_split`). The headline IC
+   and the acceptance decision (|IC| >= 0.02, p <= 0.05) use the TEST
+   (out-of-sample) IC; the train and full-history ICs are reported alongside.
+   Split dates are configurable: `train_end_date` (default `2020-12-31`) and
+   `test_start_date` (default `2021-01-01`) in the workflow config.
+3. **Sector neutralization.** The Rank IC is computed after demeaning the
+   signal values and the forward returns by GICS sector within each date's
+   cross-section (`signal_evaluator.py`, `compute_rank_ic` with
+   `sector_map`). The sector map is `src/signal_discovery_workflow/data/sp500/sectors.csv`
+   (source: the `datasets/s-and-p-500-companies` constituents CSV, a mirror of
+   the Wikipedia "List of S&P 500 companies", fetched 2026-11-22). Coverage:
+   367 of 392 tickers (93.6%); the 25 unmapped tickers are no longer in the
+   current S&P 500 and are marked `Unknown` and excluded from the neutralized
+   IC. Disable with `sector_neutralize: false` in the workflow config; if the
+   map file is missing the evaluator falls back to the raw IC.
+
+`configs/config-optimization-local.yml` points the three LLMs at a local
+OpenAI-compatible proxy on `http://127.0.0.1:8000/v1/` instead of NVIDIA NIM
+directly (see `nim_proxy.py` in the run setup). Start the proxy first, then
+run with `--config_file configs/config-optimization-local.yml`.
+
 ## Getting Started
 
 ### Prerequisites

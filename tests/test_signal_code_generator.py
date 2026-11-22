@@ -161,6 +161,35 @@ class TestParseSignalSpecsWithErrors:
         assert specs == []
         assert errors and "JSON" in errors[0]
 
+    def test_rejects_unknown_operator(self, valid_op_names):
+        # Rank_Exp is not a real operator (the live run's iteration-2 bug):
+        # the signal must be rejected at parse time, naming the operator.
+        bad = _signal("Quality Revenue Momentum", "Rank_Exp(TS_Return(Revenue, 5), 20)")
+        good = _signal("Mom", "TS_Return(Close, 20)")
+        specs, errors = parse_signal_specs_with_errors(
+            json.dumps([bad, good]), valid_op_names
+        )
+        assert len(specs) == 1
+        assert "mom" in specs[0]["name"].lower()
+        assert any("Rank_Exp" in e for e in errors)
+        assert any("unknown operator" in e for e in errors)
+
+    def test_rejects_unknown_operator_nested_in_formula(self, valid_op_names):
+        bad = _signal("Nested", "Div(Rank(ROE), Rank_Exp(RevenueGrowth, 10))")
+        specs, errors = parse_signal_specs_with_errors(
+            json.dumps([bad]), valid_op_names
+        )
+        assert specs == []
+        assert any("Rank_Exp" in e for e in errors)
+
+    def test_valid_operators_still_pass(self, valid_op_names):
+        good = _signal("Mom", "Rank(TS_Return(Close, 20))")
+        specs, errors = parse_signal_specs_with_errors(
+            json.dumps([good]), valid_op_names
+        )
+        assert len(specs) == 1
+        assert errors == []
+
 
 # ---------------------------------------------------------------------------
 # collect_operator_code

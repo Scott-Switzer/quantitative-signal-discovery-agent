@@ -48,6 +48,58 @@ OUTPUT_TEMPLATE_JSON = TEMPLATE_DIR / "signal_output_template.json"
 
 VALID_DATA_FIELDS = {"Open", "Close", "High", "Low", "Volume"}
 
+# Fundamental data fields (point-in-time, forward-filled from each filing's
+# FILED date; see the fundamentals README). Raw reported values only, never
+# derived ratios: the operators build ratios themselves, e.g.
+# Div(NetIncome, Equity) is ROE. Keep this dict in sync with the
+# FUNDAMENTAL_FIELDS list in signal_evaluator.py.
+FUNDAMENTAL_FIELDS = {
+    "Revenue": "latest reported quarterly revenue (point-in-time)",
+    "NetIncome": "latest reported quarterly net income (point-in-time)",
+    "OperatingIncome": "latest reported quarterly operating income (point-in-time)",
+    "Assets": "latest reported total assets (point-in-time)",
+    "Liabilities": "latest reported total liabilities (point-in-time)",
+    "Equity": "latest reported stockholders equity (point-in-time); ROE is Div(NetIncome, Equity)",
+    "Cash": "latest reported cash and cash equivalents (point-in-time)",
+    "LongTermDebt": "latest reported long-term debt (point-in-time)",
+}
+VALID_DATA_FIELDS = VALID_DATA_FIELDS | set(FUNDAMENTAL_FIELDS)
+
+# Pre-computed ratio and percentage panels (derived from the raw fundamental
+# panels above, same point-in-time property; see the fundamentals README).
+# Raw fundamentals are company-specific absolute numbers that do not compare
+# across companies. These ratios are comparable cross-sectionally, so the LLM
+# can use them directly instead of rebuilding them with Div. A ratio is
+# defined only where its denominator is positive and non-missing; division
+# by zero and negative denominators give NaN. Keep this dict in sync with
+# the RATIO_FIELDS list in signal_evaluator.py.
+RATIO_FIELDS = {
+    "ROE": "pre-computed return on equity, NetIncome / Equity, comparable across companies (point-in-time)",
+    "ROA": "pre-computed return on assets, NetIncome / Assets, comparable across companies (point-in-time)",
+    "OperatingMargin": "pre-computed operating margin, OperatingIncome / Revenue (point-in-time)",
+    "NetMargin": "pre-computed net margin, NetIncome / Revenue (point-in-time)",
+    "RevenueGrowth": "pre-computed year-over-year revenue growth, 252 trading days (point-in-time)",
+    "NetIncomeGrowth": "pre-computed year-over-year net income growth, 252 trading days (point-in-time)",
+    "DebtToEquity": "pre-computed leverage, Liabilities / Equity (point-in-time)",
+    "LongTermDebtToEquity": "pre-computed leverage, LongTermDebt / Equity (point-in-time)",
+    "EquityToAssets": "pre-computed equity share of assets, Equity / Assets (point-in-time)",
+    "CashToAssets": "pre-computed cash share of assets, Cash / Assets (point-in-time)",
+}
+VALID_DATA_FIELDS = VALID_DATA_FIELDS | set(RATIO_FIELDS)
+
+
+def format_data_fields_for_prompt() -> str:
+    """Format the DATA section of the prompt: OHLCV plus each fundamental
+    field with a one-line meaning."""
+    lines = ["DATA: Open, Close, High, Low, Volume"]
+    lines.append("FUNDAMENTALS (raw reported values, point-in-time, forward-filled from filed date):")
+    for name, meaning in FUNDAMENTAL_FIELDS.items():
+        lines.append(f"  {name}: {meaning}")
+    lines.append("RATIOS (pre-computed comparable metrics, derived from the fundamentals above, point-in-time):")
+    for name, meaning in RATIO_FIELDS.items():
+        lines.append(f"  {name}: {meaning}")
+    return "\n".join(lines)
+
 
 def load_calculator_operators() -> list[dict]:
     """Load operator definitions from ``template/calculator.json``."""
@@ -148,7 +200,7 @@ def build_signal_prompt(
 
 REQUEST: {request}
 {feedback_section}
-DATA: Open, Close, High, Low, Volume
+{format_data_fields_for_prompt()}
 
 OPERATORS:
 {operators_list}
