@@ -57,17 +57,46 @@ workflow:
   signal_generator_llm: signal_generator
   code_generator_llm: code_generator
   optimization_advisor_llm: optimization_advisor
+
+  # Acceptance is measured on the VALIDATION window only.
   ic_threshold: 0.02
   p_value_threshold: 0.05
-  max_iterations: 3
-  num_signals: 2
+
+  # More exploration per unit of wall clock. Six ideas per iteration and four
+  # iterations is 24 candidates instead of the old 6; every candidate is
+  # evaluated separately and recorded in the ledger.
+  max_iterations: 4
+  num_signals: 6
   forward_periods: 5
-  # Out-of-sample split: the headline IC and the acceptance decision use the
-  # TEST period only. Train IC is reported alongside so overfitting is visible.
+
+  # Purged three-way split. Train ends 2020-12-31, validation runs
+  # 2021-01-01..2024-12-31, and the test holdout starts 2025-01-01 and is
+  # never used for selection. purge_periods defaults to forward_periods.
   train_end_date: "2020-12-31"
+  validation_end_date: "2024-12-31"
   test_start_date: "2021-01-01"
-  # Sector-neutralized Rank IC (demean signal and returns by GICS sector per
-  # date) when data/sp500/sectors.csv is present. Falls back to the raw IC
-  # when the map is missing.
+
+  # Sector-neutral rank IC. Uses data/sp500/sectors.csv for the Yahoo path and
+  # the SIC map for the CRSP path.
   sector_neutralize: true
+  min_names: 10
+
+  # Cost-aware screen and IC decay for the chosen signal.
+  cost_bps: 10.0
+  screen_quantile: 0.2
+  ic_decay_horizons: "1,5,10,21,63"
+
+  # Cloudflare R2 is the data and results plane. `data_source` is a panel URI
+  # (r2://bucket/key); when set, panels are read in memory and no CSV is staged.
+  # `results_uri` is a prefix for saved results and the default ledger location.
+  # Both fall back to QSD_DATA_SOURCE / QSD_RESULTS_URI. Null means the local
+  # Yahoo CSV fallback, which is not the intended production path.
+  data_source: null
+  results_uri: null
+
+  # Persistent trial ledger: enables de-duplication and Benjamini-Hochberg FDR
+  # over the whole search history. Defaults to <results_uri>/trials.jsonl.
+  registry_path: null
+  dedupe_trials: true
+
   save_results: true

@@ -24,12 +24,16 @@ dependencies = [
   # Pin both NAT packages to the same compatible release line. Mixing different
   # minor versions of nvidia-nat-* causes ImportErrors like
   # "cannot import name 'register_dataset_loader' from 'nat.cli.register_workflow'".
-  "nvidia-nat[langchain]==1.6.*",
-  "nvidia-nat-phoenix==1.6.*",
-  "pandas",
-  "numpy",
-  "scipy",
-  "yfinance",
+  #
+  # 1.9.0 is the current release. NOTE: NVIDIA deprecated NeMo Agent Toolkit in
+  # October 2026, with end of life at the end of 2026; see README "Deprecation".
+  "nvidia-nat[langchain]==1.9.*",
+  "nvidia-nat-phoenix==1.9.*",
+  "pandas>=2.1",
+  "numpy>=1.26",
+  "scipy>=1.11",
+  "yfinance>=0.2.60",
+  "pyarrow>=15.0",
   "arize-phoenix",
   "arize-phoenix-otel",
   "openinference-instrumentation-langchain",

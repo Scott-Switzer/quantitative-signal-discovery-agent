@@ -2,6 +2,17 @@
 
 An end-to-end signal discovery workflow for quantitative finance using NVIDIA NeMo Agent Toolkit. This workflow demonstrates how to leverage LLMs to automatically generate, code, and evaluate alpha signals.
 
+> **Fork status (2026-11-22):** the evaluation and search logic were audited and
+> rebuilt. Acceptance now uses a purged validation window with Newey-West
+> significance, every candidate is scored and recorded, and every trial is
+> corrected for multiple testing. See [FINDINGS.md](FINDINGS.md) for the defect
+> list and the measured results. The data path for survivorship-free research is
+> the fund's CRSP panel in Cloudflare R2 (`phf_bridge.py`), not Yahoo.
+>
+> **Upstream note:** NVIDIA deprecated NeMo Agent Toolkit in October 2026 (EOL
+> end of 2026). This fork pins the current 1.9 release, but a migration is a
+> known outstanding project.
+
 ## Overview
 
 Signal discovery is the process of finding quantitative signals — also known as alpha signals — that have predictive power for future stock returns. This workflow automates the traditional labor-intensive process using LLMs.

@@ -42,14 +42,17 @@ import logging
 import re
 from typing import Iterable
 
-from langchain_core.messages import HumanMessage, SystemMessage
-from nat.builder.builder import Builder
-from nat.builder.framework_enum import LLMFrameworkEnum
-from nat.builder.function_info import FunctionInfo
-from nat.cli.register_workflow import register_function
-from nat.data_models.function import FunctionBaseConfig
 from pydantic import Field
 
+from ._compat import (
+    Builder,
+    FunctionBaseConfig,
+    FunctionInfo,
+    HumanMessage,
+    LLMFrameworkEnum,
+    SystemMessage,
+    register_function,
+)
 from .llm_utils import (
     NO_THINK_INSTRUCTION,
     extract_json_array,
@@ -118,6 +121,22 @@ DATA_FIELD_ALIASES = {
     "revenuegrowth": "RevenueGrowth",
     "net_income_growth": "NetIncomeGrowth",
     "netincomegrowth": "NetIncomeGrowth",
+    "book_to_market": "BookToMarket",
+    "booktomarket": "BookToMarket",
+    "earnings_yield": "EarningsYield",
+    "earningsyield": "EarningsYield",
+    "operating_profitability": "OperatingProfitability",
+    "operatingprofitability": "OperatingProfitability",
+    "asset_growth": "AssetGrowth",
+    "assetgrowth": "AssetGrowth",
+    "share_issuance": "ShareIssuance",
+    "shareissuance": "ShareIssuance",
+    "leverage": "Leverage",
+    "book_equity_to_assets": "BookEquityToAssets",
+    "bookequitytoassets": "BookEquityToAssets",
+    "market_cap": "MarketCap",
+    "marketcap": "MarketCap",
+    "returns": "Returns",
     "debt_to_equity": "DebtToEquity",
     "debttoequity": "DebtToEquity",
     "debt_equity": "DebtToEquity",
@@ -127,6 +146,39 @@ DATA_FIELD_ALIASES = {
     "equitytoassets": "EquityToAssets",
     "cash_to_assets": "CashToAssets",
     "cashtoassets": "CashToAssets",
+    "fcf_yield": "FcfYield",
+    "fcfy": "FcfYield",
+    "free_cash_flow_yield": "FcfYield",
+    "ebit_to_ev": "EbitToEv",
+    "ebit_ev": "EbitToEv",
+    "cash_flow_to_assets": "CashFlowToAssets",
+    "cfo_to_assets": "CashFlowToAssets",
+    "debt_to_assets": "DebtToAssets",
+    "macro_vix": "MacroVIX",
+    "vix": "MacroVIX",
+    "macro_yield_curve": "MacroYieldCurve",
+    "yield_curve": "MacroYieldCurve",
+    "macro_nfci": "MacroNFCI",
+    "nfci": "MacroNFCI",
+    "earnings_accel": "EarningsAccel",
+    "revenue_accel": "RevenueAccel",
+    "margin_delta": "MarginDelta",
+    "quarterly_roe_delta": "QuarterlyRoeDelta",
+    "filing_text_change": "FilingTextChange",
+    "filing_jaccard_diff": "FilingJaccardDiff",
+    "filing_length_delta": "FilingLengthDelta",
+    "amihud_illiq": "AmihudIlliq",
+    "amihud": "AmihudIlliq",
+    "idio_vol": "IdioVol",
+    "idiosyncratic_volatility": "IdioVol",
+    "high_52w_ratio": "High52wRatio",
+    "high52w": "High52wRatio",
+    "volume_shock": "VolumeShock",
+    "insider_net_buy_ratio": "InsiderNetBuyRatio",
+    "insider_cluster_buys": "InsiderClusterBuys",
+    "discretionary_buy_ratio": "DiscretionaryBuyRatio",
+    "inst_ownership_delta": "InstOwnershipDelta",
+    "inst_crowding": "InstCrowding",
 }
 
 
@@ -143,35 +195,22 @@ def _python_function_name(name: str | None, index: int) -> str:
 
 
 def _infer_fields_from_formula(formula: str) -> list[str]:
-    """Detect which OHLCV, fundamental, and ratio fields the formula references."""
+    """Detect which loaded fields the formula references.
+
+    This must be derived from the valid field set, not a hand-maintained list:
+    a field missing here is not passed to the generated function, the formula
+    then raises ``NameError``, and the whole iteration silently produces no
+    candidates. That is exactly what happened to the first fundamentals run.
+    """
+    ordered = ["Open", "Close", "High", "Low", "Volume"] + sorted(
+        VALID_DATA_FIELDS - {"Open", "Close", "High", "Low", "Volume"},
+        key=len,
+        reverse=True,
+    )
     return [
-        f
-        for f in (
-            "Open",
-            "Close",
-            "High",
-            "Low",
-            "Volume",
-            "Revenue",
-            "NetIncome",
-            "OperatingIncome",
-            "Assets",
-            "Liabilities",
-            "Equity",
-            "Cash",
-            "LongTermDebt",
-            "ROE",
-            "ROA",
-            "OperatingMargin",
-            "NetMargin",
-            "RevenueGrowth",
-            "NetIncomeGrowth",
-            "DebtToEquity",
-            "LongTermDebtToEquity",
-            "EquityToAssets",
-            "CashToAssets",
-        )
-        if re.search(rf"\b{f}\b", formula)
+        field
+        for field in ordered
+        if re.search(rf"\b{re.escape(field)}\b", formula)
     ]
 
 
@@ -227,6 +266,41 @@ def _check_formula_arity(formula: str, arities: dict[str, tuple[int, int]]) -> s
                 else f"at least {min_args}"
             )
             return f"{name} expects {expected} arg(s), got {n_args}"
+    return None
+
+
+def _check_unstable_denominator(formula: str) -> str | None:
+    """Reject divisions by a cross-sectionally demeaned/ranked panel.
+
+    ``Div(x, CS_Demean(y))`` is the defect that produced the first accepted SEC
+    signal: a demeaned denominator crosses zero, so the ratio has enormous
+    outliers and the rank IC is driven by a handful of names. It is not a
+    signal, it is a numerical accident.
+    """
+    try:
+        tree = ast.parse(formula, mode="eval")
+    except SyntaxError:
+        return None
+    unstable = {"CS_Demean", "Neutralize", "CS_Rank", "Rank"}
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "Div"
+            and len(node.args) >= 2
+        ):
+            denominator = node.args[1]
+            calls = {
+                inner.func.id
+                for inner in ast.walk(denominator)
+                if isinstance(inner, ast.Call) and isinstance(inner.func, ast.Name)
+            }
+            bad = calls & unstable
+            if bad:
+                return (
+                    f"denominator uses {sorted(bad)[0]}, which crosses zero; "
+                    "divide first, then demean"
+                )
     return None
 
 
@@ -317,6 +391,11 @@ def parse_signal_specs_with_errors(
         operator_error = _check_formula_operators(formula, arities)
         if operator_error:
             skipped.append(f"#{idx} ({signal.get('name', '?')}: {operator_error})")
+            continue
+
+        stability_error = _check_unstable_denominator(formula)
+        if stability_error:
+            skipped.append(f"#{idx} ({signal.get('name', '?')}: {stability_error})")
             continue
 
         arity_error = _check_formula_arity(formula, arities)
@@ -443,22 +522,39 @@ def assemble_module(operator_code: str, signal_function_code: str) -> str:
     return f"import pandas as pd\nimport numpy as np\n\n{operator_code}\n\n{signal_function_code}\n"
 
 
+def render_signal_functions_deterministic(specs: list[dict]) -> str:
+    """Deterministically compile AST-validated signal specs into Python functions.
+
+    Eliminates the redundant code-generator LLM round-trip (~15-30s/iteration)
+    and prevents LLM syntax/formatting hallucinations while producing identical
+    typed ``def signal_*(...): return <formula>`` functions.
+    """
+    blocks: list[str] = []
+    for spec in specs:
+        params = ", ".join(f"{field}: pd.DataFrame" for field in spec["fields"])
+        doc = json.dumps(str(spec.get("doc") or spec["name"]))
+        blocks.append(
+            f"def {spec['name']}({params}) -> pd.DataFrame:\n"
+            f"    {doc}\n"
+            f"    return {spec['formula']}\n"
+        )
+    return "\n".join(blocks)
+
+
 async def generate_signal_code(
     llm,
     signal_json: str,
     operators: list[dict],
     errors_out: list[str] | None = None,
+    use_llm: bool = False,
 ) -> str:
     """
     End-to-end: signal JSON -> self-contained executable Python module.
 
-    1. Parse the signal JSON into normalized specs.
-    2. Ask the LLM to write a function body for each spec.
+    1. Parse and AST-validate the signal JSON into normalized specs.
+    2. Deterministically emit Python function definitions (or call ``llm`` if
+       ``use_llm=True`` is explicitly requested).
     3. Inline the operator definitions and imports.
-
-    If ``errors_out`` is supplied, the parser's skip messages (e.g. arity
-    violations) are appended to it so the caller can route them back into the
-    next iteration's feedback prompt.
     """
     code_map = get_operator_code_map(operators)
     specs, parse_errors = parse_signal_specs_with_errors(signal_json, code_map.keys())
@@ -469,7 +565,10 @@ async def generate_signal_code(
         logger.warning("No usable signals found in generator output")
         return assemble_module("", "# No valid signals generated\n")
 
-    function_code = await generate_signal_function_code(llm, specs, operators)
+    if use_llm and llm is not None:
+        function_code = await generate_signal_function_code(llm, specs, operators)
+    else:
+        function_code = render_signal_functions_deterministic(specs)
     operator_code = collect_operator_code(specs, code_map)
     return assemble_module(operator_code, function_code)
 

@@ -13,9 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Signal Discovery Workflow (no-telemetry): generate -> code -> evaluate -> feedback loop.
-# Variant of config-optimization.yml with the Phoenix tracing exporter stripped, intended
-# for cloud / Brev runs where there is no separate `phoenix serve` process to push traces to.
+# Signal Discovery Workflow (no-telemetry): identical evaluation semantics to
+# config-optimization.yml with the Phoenix exporter stripped, for cloud / Brev
+# runs where there is no `phoenix serve` process.
+#
+# This file must stay in sync with config-optimization.yml. Previously it
+# omitted the out-of-sample split and sector-neutralization settings, so the QA
+# workflow silently tested a different (older) scoring configuration.
 
 llms:
   signal_generator:
@@ -52,7 +56,19 @@ workflow:
   optimization_advisor_llm: optimization_advisor
   ic_threshold: 0.02
   p_value_threshold: 0.05
-  max_iterations: 3
-  num_signals: 2
+  max_iterations: 4
+  num_signals: 6
   forward_periods: 5
+  train_end_date: "2020-12-31"
+  validation_end_date: "2024-12-31"
+  test_start_date: "2021-01-01"
+  sector_neutralize: true
+  min_names: 10
+  cost_bps: 10.0
+  screen_quantile: 0.2
+  ic_decay_horizons: "1,5,10,21,63"
+  data_source: null
+  results_uri: null
+  registry_path: null
+  dedupe_trials: true
   save_results: true

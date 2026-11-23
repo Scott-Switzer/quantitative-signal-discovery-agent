@@ -1,0 +1,90 @@
+# SPDX-FileCopyrightText: Copyright (c) 2023-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Run the same discovery loop on the personal hedge fund's release-pinned CRSP
+# panel instead of Yahoo S&P 500 data.
+#
+#   export R2_ACCESS_KEY_ID=... R2_SECRET_ACCESS_KEY=... R2_S3_ENDPOINT=https://<account>.r2.cloudflarestorage.com
+#   export QSD_DATA_SOURCE=r2://financial-data-wrds-private/<panel key>
+#   export QSD_RESULTS_URI=r2://financial-data-wrds-lakehouse/research/signals
+#   python -m signal_discovery_workflow.phf_bridge --check   # coverage, writes nothing
+#   nat run --config_file configs/config-crsp.yml --input "..."
+#
+# Differences from the equity-daily config, all forced by the data:
+#   * monthly rows, so the forward horizon is 1 period (one month);
+#   * a much longer history (1962-2024) and a wider universe (26k securities),
+#     so the split uses decades rather than years;
+#   * sector neutralization uses the coarse SIC division, not GICS.
+
+llms:
+  signal_generator:
+    _type: nim
+    model_name: nvidia/nemotron-3.5-lightning-30b-a3b
+    base_url: "https://integrate.api.nvidia.com/v1/"
+    temperature: 0.8
+    max_tokens: 4000
+    chat_template_kwargs:
+      enable_thinking: false
+
+  code_generator:
+    _type: nim
+    model_name: nvidia/nemotron-3.5-lightning-30b-a3b
+    base_url: "https://integrate.api.nvidia.com/v1/"
+    temperature: 0.0
+    max_tokens: 3000
+    chat_template_kwargs:
+      enable_thinking: false
+
+  optimization_advisor:
+    _type: nim
+    model_name: nvidia/nemotron-3.5-lightning-30b-a3b
+    base_url: "https://integrate.api.nvidia.com/v1/"
+    temperature: 0.5
+    max_tokens: 2000
+    chat_template_kwargs:
+      enable_thinking: false
+
+workflow:
+  _type: signal_optimizer
+  signal_generator_llm: signal_generator
+  code_generator_llm: code_generator
+  optimization_advisor_llm: optimization_advisor
+
+  ic_threshold: 0.02
+  p_value_threshold: 0.05
+
+  max_iterations: 3
+  num_signals: 5
+  # One CRSP row is one month.
+  forward_periods: 1
+
+  # Train through 2004, validate 2005-2015, hold out 2016-2024.
+  train_end_date: "2004-12-31"
+  validation_end_date: "2015-12-31"
+  test_start_date: "2016-01-01"
+
+  sector_neutralize: true
+  min_names: 50
+  # CRSP rows are monthly; annualizing with 252 would inflate IC_IR and Sharpe ~4.6x.
+  periods_per_year: 12
+
+  cost_bps: 10.0
+  screen_quantile: 0.2
+  ic_decay_horizons: "1,3,6,12"
+
+  # Read the panel in place and write results back to R2. Set these (or the
+  # QSD_DATA_SOURCE / QSD_RESULTS_URI environment variables) before running.
+  # Example:
+  #   data_source: r2://financial-data-wrds-private/research/panels/<release>/panel.parquet
+  #   results_uri: r2://financial-data-wrds-lakehouse/research/signals
+  data_source: null
+  results_uri: null
+  # Point-in-time Compustat + the CCM link, read in place from R2. Without these
+  # the generator can only propose price/volume signals.
+  fundamentals_uri: r2://financial-data-wrds-private/raw/wrds/compsamp_snapshot__wrds_csa_pit/releases/20260916T074335Z
+  ccm_uri: r2://financial-data-wrds-private/raw/wrds/crsp__ccmxpf_linktable/releases/20260922T085328Z
+  # Refuse to fall back to local CSVs: this config is meant to read R2 only.
+  require_remote: true
+  registry_path: null
+  dedupe_trials: true
+  save_results: true

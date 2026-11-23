@@ -1,0 +1,110 @@
+# SPDX-FileCopyrightText: Copyright (c) 2023-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Weekly CRSP sleeve with microstructure panels, Form 4/13F, fail-closed CCM
+# identity bridge, monthly-compounded JKP 6-factor alpha gate, DSR & stability.
+
+llms:
+  signal_generator:
+    _type: nim
+    model_name: nvidia/nemotron-3.5-lightning-30b-a3b
+    base_url: "https://integrate.api.nvidia.com/v1/"
+    temperature: 0.8
+    max_tokens: 4000
+    chat_template_kwargs:
+      enable_thinking: false
+
+  code_generator:
+    _type: nim
+    model_name: nvidia/nemotron-3.5-lightning-30b-a3b
+    base_url: "https://integrate.api.nvidia.com/v1/"
+    temperature: 0.0
+    max_tokens: 3000
+    chat_template_kwargs:
+      enable_thinking: false
+
+  optimization_advisor:
+    _type: nim
+    model_name: nvidia/nemotron-3.5-lightning-30b-a3b
+    base_url: "https://integrate.api.nvidia.com/v1/"
+    temperature: 0.5
+    max_tokens: 2000
+    chat_template_kwargs:
+      enable_thinking: false
+
+workflow:
+  _type: signal_optimizer
+  signal_generator_llm: signal_generator
+  code_generator_llm: code_generator
+  optimization_advisor_llm: optimization_advisor
+
+  ic_threshold: 0.015
+  p_value_threshold: 0.05
+  max_iterations: 8
+  num_signals: 8
+  stop_on_acceptance: false
+  require_fdr_significance: true
+  fdr_q: 0.10
+  min_net_sharpe: 0.50
+  min_monotonicity: 0.50
+  min_spread_tstat: 2.0
+  min_dsr: 0.95
+  min_subperiod_stability: 0.50
+
+  forward_periods: 1
+  periods_per_year: 52
+  train_end_date: "2015-12-31"
+  validation_end_date: "2020-12-31"
+  test_start_date: "2021-01-01"
+
+  sector_neutralize: false
+  min_names: 100
+  fundamentals_only: false
+  residualize_returns: true
+
+  cost_bps: 10.0
+  short_borrow_bps: 50.0
+  impact_coeff: 0.15
+  aum_usd: 1000000.0
+  vol_scaled: true
+  max_weight: 0.03
+  screen_quantile: 0.15
+  screen_buffer_quantile: 0.30
+  ic_decay_horizons: "1,2,4,8,13"
+
+  enable_alpha_pool: true
+  pool_min_ic: 0.008
+  pool_max_corr: 0.50
+  pool_max_size: 25
+  pool_ridge_alpha: 10.0
+  pool_gbdt_weight: 0.45
+  eval_workers: 8
+
+  feature_store_uri: r2://financial-data-wrds-lakehouse/research/feature_store/weekly_v1
+  weekly_crsp_uri: r2://financial-system-datasets/gold/crsp-merged/releases/59a8f2e042ce218391401db889fff6a5d50dd71c49751268eb882dfbeeaa4d94/
+  weekly_start_date: "2005-01-01"
+  weekly_end_date: "2024-12-31"
+  lakehouse_v2_uri: r2://financial-data-wrds-lakehouse/__r2_data_catalog/01a0cf99-54a7-7e92-b0ea-6453c8e0b34b/01a0e5a6-7ed3-7540-801b-24ec2613cece/data/
+
+  min_price: 5.0
+  min_dollar_volume_pct: 0.20
+  top_n_market_cap: 1500
+
+  factor_returns_uri: r2://financial-system-datasets/free-resource-lake/parquet/factor_returns/
+  min_alpha_tstat: 2.0
+
+  fred_macro_uri: r2://financial-system-datasets/gold/fred/CURRENT.json
+  sec_quarterly_uri: r2://financial-data-wrds-lakehouse/__r2_data_catalog/01a0cf99-54a7-7e92-b0ea-6453c8e0b34b/01a0d45e-84e1-7333-a610-9b70beb81488/data/
+  lazy_prices_uri: r2://financial-data-wrds-lakehouse/research/datasets/lazy_prices/panel.parquet
+  form4_uri: r2://financial-data-wrds-lakehouse/research/datasets/sec_form4/panel.parquet
+  f13_uri: r2://financial-data-wrds-lakehouse/research/datasets/sec_13f/panel.parquet
+  cik_bridge_uri: r2://financial-data-wrds-private/raw/wrds/crsp__ccm_lookup/releases/20260922T085328Z/part-000000.parquet
+
+  results_uri: null
+  pin_policy: record
+  sharded_ledger: true
+  phf_runs_uri: r2://financial-data-wrds-lakehouse/research/runs
+  require_remote: true
+  registry_path: null
+  dedupe_trials: true
+  save_results: true

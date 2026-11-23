@@ -65,15 +65,24 @@ workflow:
   optimization_advisor_llm: optimization_advisor
   ic_threshold: 0.02
   p_value_threshold: 0.05
-  max_iterations: 3
-  num_signals: 2
+  max_iterations: 4
+  num_signals: 6
   forward_periods: 5
-  # Out-of-sample split: the headline IC and the acceptance decision use the
-  # TEST period only. Train IC is reported alongside so overfitting is visible.
+  # Purged three-way split: train ends 2020-12-31, validation runs
+  # 2021-01-01..2024-12-31, test holdout starts 2025-01-01.
   train_end_date: "2020-12-31"
+  validation_end_date: "2024-12-31"
   test_start_date: "2021-01-01"
   # Sector-neutralized Rank IC (demean signal and returns by GICS sector per
   # date) when data/sp500/sectors.csv is present. Falls back to the raw IC
   # when the map is missing.
   sector_neutralize: true
+  min_names: 10
+  cost_bps: 10.0
+  screen_quantile: 0.2
+  ic_decay_horizons: "1,5,10,21,63"
+  data_source: null
+  results_uri: null
+  registry_path: null
+  dedupe_trials: true
   save_results: true

@@ -17,3 +17,7 @@ src/signal_discovery_workflow/data/sp500/*.csv
 
 # Local documentation (not for upstream)
 docs/
+
+# CRSP/R2 panel exports must never be staged locally
+src/signal_discovery_workflow/data/crsp/
+src/signal_discovery_workflow/data/*/_download_meta.json

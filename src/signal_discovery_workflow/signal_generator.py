@@ -30,14 +30,17 @@ import logging
 import re
 from pathlib import Path
 
-from langchain_core.messages import HumanMessage, SystemMessage
-from nat.builder.builder import Builder
-from nat.builder.framework_enum import LLMFrameworkEnum
-from nat.builder.function_info import FunctionInfo
-from nat.cli.register_workflow import register_function
-from nat.data_models.function import FunctionBaseConfig
 from pydantic import Field
 
+from ._compat import (
+    Builder,
+    FunctionBaseConfig,
+    FunctionInfo,
+    HumanMessage,
+    LLMFrameworkEnum,
+    SystemMessage,
+    register_function,
+)
 from .llm_utils import NO_THINK_INSTRUCTION, extract_response_text
 
 logger = logging.getLogger(__name__)
@@ -46,7 +49,7 @@ TEMPLATE_DIR = Path(__file__).parent / "template"
 CALCULATOR_JSON = TEMPLATE_DIR / "calculator.json"
 OUTPUT_TEMPLATE_JSON = TEMPLATE_DIR / "signal_output_template.json"
 
-VALID_DATA_FIELDS = {"Open", "Close", "High", "Low", "Volume"}
+VALID_DATA_FIELDS = {"Open", "Close", "High", "Low", "Volume", "MarketCap", "Returns"}
 
 # Fundamental data fields (point-in-time, forward-filled from each filing's
 # FILED date; see the fundamentals README). Raw reported values only, never
@@ -74,31 +77,158 @@ VALID_DATA_FIELDS = VALID_DATA_FIELDS | set(FUNDAMENTAL_FIELDS)
 # by zero and negative denominators give NaN. Keep this dict in sync with
 # the RATIO_FIELDS list in signal_evaluator.py.
 RATIO_FIELDS = {
+    "BookToMarket": "book equity / market cap (point-in-time)",
+    "EarningsYield": "annual net income / market cap (point-in-time)",
+    "FcfYield": "free cash flow (operating cash flow - capex) / market cap (point-in-time)",
+    "EbitToEv": "operating income / enterprise value (market cap + debt - cash, point-in-time)",
+    "GrossProfitability": "gross profit / LAGGED assets (point-in-time; only when COGS is in the release)",
+    "AssetTurnover": "sales / lagged assets (point-in-time)",
+    "SalesToAssets": "sales / lagged assets (point-in-time)",
+    "Accruals": "(net income - operating cash flow) / assets; high accruals underperform (point-in-time)",
+    "CashFlowToAssets": "operating cash flow / LAGGED assets, cash-backed quality (point-in-time)",
+    "AssetGrowth": "year-over-year asset growth; high growth underperforms (point-in-time)",
+    "Leverage": "total liabilities / assets (point-in-time)",
+    "DebtToAssets": "total debt / assets (point-in-time)",
+    "BookEquityToAssets": "book equity / assets, a solvency measure (point-in-time)",
+    "ShareIssuance": "year-over-year growth in shares outstanding; high issuance underperforms (point-in-time)",
+    "SgaToSales": "SG&A expense / sales (point-in-time)",
+    "RndToSales": "R&D expense / sales (point-in-time)",
+    "CapexToAssets": "capital expenditures / lagged assets (point-in-time)",
+    "Roe": "annual net income / LAGGED book equity (point-in-time)",
+    "Roa": "annual net income / LAGGED assets (point-in-time)",
     "ROE": "pre-computed return on equity, NetIncome / Equity, comparable across companies (point-in-time)",
     "ROA": "pre-computed return on assets, NetIncome / Assets, comparable across companies (point-in-time)",
+    "OperatingProfitability": "annual operating income / LAGGED assets (point-in-time)",
     "OperatingMargin": "pre-computed operating margin, OperatingIncome / Revenue (point-in-time)",
     "NetMargin": "pre-computed net margin, NetIncome / Revenue (point-in-time)",
-    "RevenueGrowth": "pre-computed year-over-year revenue growth, 252 trading days (point-in-time)",
-    "NetIncomeGrowth": "pre-computed year-over-year net income growth, 252 trading days (point-in-time)",
+    "RevenueGrowth": "pre-computed year-over-year revenue growth (point-in-time)",
+    "NetIncomeGrowth": "pre-computed year-over-year net income growth (point-in-time)",
     "DebtToEquity": "pre-computed leverage, Liabilities / Equity (point-in-time)",
     "LongTermDebtToEquity": "pre-computed leverage, LongTermDebt / Equity (point-in-time)",
     "EquityToAssets": "pre-computed equity share of assets, Equity / Assets (point-in-time)",
     "CashToAssets": "pre-computed cash share of assets, Cash / Assets (point-in-time)",
+    "EarningsAccel": "quarter-over-quarter acceleration in YoY earnings scaled by lagged revenue (point-in-time)",
+    "RevenueAccel": "quarter-over-quarter acceleration in YoY revenue growth (point-in-time)",
+    "MarginDelta": "year-over-year change in quarterly operating margin (point-in-time)",
+    "QuarterlyRoeDelta": "year-over-year change in quarterly ROE (point-in-time)",
+    "FilingTextChange": "YoY 10-K/10-Q cosine text distance (Lazy Prices; higher change predicts lower returns)",
+    "FilingJaccardDiff": "YoY 10-K/10-Q vocabulary Jaccard distance (Lazy Prices, point-in-time)",
+    "FilingLengthDelta": "YoY log change in 10-K/10-Q token length (point-in-time)",
+    "InsiderNetBuyRatio": "trailing 90d discretionary Form 4 insider net buying ratio in [-1, 1] (filing-date PIT)",
+    "InsiderClusterBuys": "log(1 + distinct discretionary Form 4 insider buyers) in trailing 90d (filing-date PIT)",
+    "DiscretionaryBuyRatio": "non-10b5-1 Form 4 insider buy dollars / total insider trade dollars (filing-date PIT)",
+    "InstOwnershipDelta": "QoQ log change in aggregate SEC 13F institutional dollar holdings (filing-date PIT)",
+    "InstCrowding": "Herfindahl concentration (HHI) of SEC 13F institutional holders (high = crowded)",
 }
-VALID_DATA_FIELDS = VALID_DATA_FIELDS | set(RATIO_FIELDS)
+
+MICROSTRUCTURE_FIELDS = {
+    "AmihudIlliq": "weekly mean of |daily return| / dollar volume (Amihud illiquidity premium)",
+    "IdioVol": "weekly realized daily return volatility (high idiosyncratic vol underperforms)",
+    "High52wRatio": "Close / rolling 52-week high (George-Hwang 52-week high anchor)",
+    "VolumeShock": "log(weekly dollar volume / rolling 13-week mean dollar volume)",
+}
+
+MACRO_FIELDS = {
+    "MacroVIX": "lagged Cboe VIX volatility index (1990+, broadcast across securities for regime conditioning)",
+    "MacroYieldCurve": "lagged US 10Y-3M Treasury spread T10Y3M (1982+, broadcast across securities)",
+    "MacroNFCI": "lagged Chicago Fed National Financial Conditions Index (1971+, positive = tighter conditions)",
+}
+
+# What the published record actually supports. These priors go into the prompt
+# so the generator starts from measured effects instead of rediscovering
+# momentum in accounting data. Directions are the ones reported in the cited
+# papers and replications; the loop still has to find them out of sample.
+ANOMALY_PRIORS = """
+ESTABLISHED FUNDAMENTALS PRIORS (use these as starting points, not as proof):
+- Value: high BookToMarket and high EarningsYield predict higher returns
+  (Fama & French 1992; Graham & Dodd).
+- Quality: high Roe, Roa and OperatingProfitability predict higher returns
+  (Novy-Marx 2013; Hou, Xue & Zhang 2015). Scale profits by LAGGED assets, not
+  current assets: current-asset scaling embeds asset growth and contaminates
+  the quality premium (Hou, Xue & Zhang 2020).
+- Investment: high AssetGrowth and high ShareIssuance predict LOWER returns
+  (Cooper, Gulen & Schill 2008; Pontiff & Woodgate 2008).
+- Leverage: high Leverage and low BookEquityToAssets predict lower returns
+  (Bhandari 1988; Penman, Richardson & Tuna 2007).
+- Profitability is stronger than accruals in modern samples; accruals need a
+  cash-flow tag that this release may not carry.
+- Realistic monthly rank IC for a single fundamentals signal is 0.02-0.05.
+  An IC above 0.10 usually means a lookback/point-in-time defect, not alpha.
+- Combining two signals only helps when they are not near-duplicates. Do not
+  build a ratio of two cross-sectionally demeaned panels: the denominator
+  crosses zero and the ratio explodes.
+"""
 
 
-def format_data_fields_for_prompt() -> str:
-    """Format the DATA section of the prompt: OHLCV plus each fundamental
-    field with a one-line meaning."""
-    lines = ["DATA: Open, Close, High, Low, Volume"]
-    lines.append("FUNDAMENTALS (raw reported values, point-in-time, forward-filled from filed date):")
-    for name, meaning in FUNDAMENTAL_FIELDS.items():
-        lines.append(f"  {name}: {meaning}")
-    lines.append("RATIOS (pre-computed comparable metrics, derived from the fundamentals above, point-in-time):")
-    for name, meaning in RATIO_FIELDS.items():
-        lines.append(f"  {name}: {meaning}")
+def anomaly_priors_block(available_fields: set[str] | None = None) -> str:
+    """Return the priors block, or an empty string on a price-only panel."""
+    if available_fields is not None and not (
+        available_fields & (set(FUNDAMENTAL_FIELDS) | set(RATIO_FIELDS))
+    ):
+        return ""
+    return ANOMALY_PRIORS.strip()
+VALID_DATA_FIELDS = VALID_DATA_FIELDS | set(RATIO_FIELDS) | set(MACRO_FIELDS) | set(MICROSTRUCTURE_FIELDS)
+
+
+def format_data_fields_for_prompt(available_fields: set[str] | None = None) -> str:
+    """Format the DATA section of the prompt.
+
+    ``available_fields`` restricts the list to the panels actually loaded for
+    this run. Advertising ROE on a price-only panel wastes generator slots: the
+    model proposes profitability signals, the strict field check rejects them,
+    and every iteration loses half its candidates.
+    """
+    def keep(name: str) -> bool:
+        return available_fields is None or name in available_fields
+
+    ohlcv = [f for f in ("Open", "Close", "High", "Low", "Volume") if keep(f)]
+    lines = ["DATA: " + (", ".join(ohlcv) if ohlcv else "(none)")]
+    market = [f for f in ("MarketCap", "Returns") if keep(f)]
+    if market:
+        lines.append(
+            "MARKET PANELS: " + ", ".join(market)
+            + " (MarketCap in dollars; Returns is the period total return)"
+        )
+
+    fundamentals = {k: v for k, v in FUNDAMENTAL_FIELDS.items() if keep(k)}
+    ratios = {k: v for k, v in RATIO_FIELDS.items() if keep(k)}
+    micro = {k: v for k, v in MICROSTRUCTURE_FIELDS.items() if keep(k)}
+    macros = {k: v for k, v in MACRO_FIELDS.items() if keep(k)}
+
+    if fundamentals:
+        lines.append("FUNDAMENTALS (raw reported values, point-in-time, forward-filled from filed date):")
+        for name, meaning in fundamentals.items():
+            lines.append(f"  {name}: {meaning}")
+    if ratios:
+        lines.append("RATIOS (pre-computed comparable metrics, derived from the fundamentals above, point-in-time):")
+        for name, meaning in ratios.items():
+            lines.append(f"  {name}: {meaning}")
+    if micro:
+        lines.append("MICROSTRUCTURE PANELS (derived from daily CRSP price/volume, backward-looking):")
+        for name, meaning in micro.items():
+            lines.append(f"  {name}: {meaning}")
+    if macros:
+        lines.append("MACRO REGIME PANELS (lagged, broadcast across securities for regime conditioning):")
+        for name, meaning in macros.items():
+            lines.append(f"  {name}: {meaning}")
+    if not fundamentals and not ratios:
+        lines.append(
+            "No fundamental or ratio panels are loaded in this run. Do not reference them; "
+            "build the signal from the price, volume and identifier fields above."
+        )
     return "\n".join(lines)
+
+
+def uses_fundamental_fields(formula: str | None) -> bool:
+    """True when a formula references at least one fundamental or ratio panel.
+
+    Used to enforce a fundamentals mandate: a price-only formula is a
+    momentum or volatility signal in disguise, whatever the prompt asked for.
+    """
+    from .signal_code_generator import _infer_fields_from_formula
+
+    fields = set(_infer_fields_from_formula(formula or ""))
+    return bool(fields & (set(FUNDAMENTAL_FIELDS) | set(RATIO_FIELDS)))
 
 
 def load_calculator_operators() -> list[dict]:
@@ -124,13 +254,18 @@ def get_operator_code_map(operators: list[dict]) -> dict[str, str]:
     return {op["name"]: op["code"] for op in operators}
 
 
-def format_operators_for_prompt(operators: list[dict], max_operators: int = 30) -> str:
+def format_operators_for_prompt(operators: list[dict], max_operators: int | None = None) -> str:
     """
     Format operator signatures + descriptions for inclusion in a prompt.
 
     Prioritizes common families (TS_*, Rank, basic arithmetic, Decay/EMA, CS_)
-    so the prompt stays bounded when many operators are available.
+    but defaults to the whole catalogue. The old default of 30 hid 36 of the
+    66 operators (CS_Rank, Neutralize, Winsorize, TS_Residual, TS_Sharpe, ...)
+    from the generator, which is why every idea came back as the same handful
+    of TS_Mean/TS_Std momentum variants.
     """
+    if max_operators is None:
+        max_operators = len(operators)
     priority_prefixes = ["TS_", "Rank", "Add", "Sub", "Mul", "Div", "Decay", "EMA", "CS_"]
     priority_ops, other_ops = [], []
     for op in operators:
@@ -188,19 +323,86 @@ def build_signal_prompt(
     template_block: str,
     feedback: str | None = None,
     example_block: str = "",
+    tried_formulas: list[str] | None = None,
+    horizon: int = 5,
+    available_fields: set[str] | None = None,
+    parent_signals: list[dict] | None = None,
+    periods_per_year: int = 252,
+    residualize_returns: bool = False,
 ) -> str:
-    """Assemble the user prompt for the signal generator LLM."""
+    """Assemble the user prompt for the signal generator LLM.
+
+    Includes optional evolutionary parent signals (QuantaAlpha / CogAlpha
+    trajectory mutation and crossover) so the generator can mutate strong
+    archived parents or recombine low-correlation mechanisms.
+    """
     feedback_section = f"\n\nPREVIOUS FEEDBACK:\n{feedback}\n" if feedback else ""
     example_section = (
         f"\nFor reference, here is an example of one valid signal:\n{example_block}\n"
         if example_block
         else ""
     )
-    return f"""You are a senior quantitative researcher. Generate {num_signals} stock selection signals.
+    parents_section = ""
+    if parent_signals:
+        parent_lines = []
+        for p in parent_signals[:6]:
+            ic_v = p.get("val_ic")
+            sh_v = p.get("val_sharpe")
+            ic_s = f"{ic_v:+.4f}" if ic_v is not None else "n/a"
+            sh_s = f"{sh_v:+.2f}" if sh_v is not None else "n/a"
+            parent_lines.append(
+                f"- {p.get('name', '?')}: {p.get('formula', '?')} (val_ic={ic_s}, val_sharpe={sh_s})"
+            )
+        parents_section = (
+            "\nEVOLUTIONARY PARENT ARCHIVE (QuantaAlpha mutation & crossover):\n"
+            "Use at least half of your slots to (a) MUTATE one parent (adjust lookback, "
+            "add volatility scaling, winsorize extremes, or gate on a macro regime) or "
+            "(b) CROSSOVER two parents from DIFFERENT economic families using Add(CS_Rank(A), CS_Rank(B)). "
+            "Use the remaining slots for genuinely novel hypotheses:\n"
+            + "\n".join(parent_lines)
+            + "\n"
+        )
+    tried_section = ""
+    if tried_formulas:
+        # Show the MOST RECENT 60 unique formulas (not the oldest 60) so the
+        # generator never loops on recent ideas once the ledger grows past 60.
+        recent_unique = list(dict.fromkeys(f for f in tried_formulas if f))[-60:]
+        listed = "\n".join(f"- {f}" for f in recent_unique)
+        tried_section = (
+            "\nALREADY TRIED — these were recently evaluated and did not clear the bar. "
+            "Do NOT repeat them or trivial rescalings of them (different constant, "
+            "same operator chain). Propose genuinely different economic mechanisms:\n"
+            f"{listed}\n"
+        )
+    if periods_per_year <= 12:
+        freq_label, unit_label, lookback_hint = "monthly", "month", "3 to 12 months (never 60+ months)"
+    elif periods_per_year <= 52:
+        freq_label, unit_label, lookback_hint = "weekly", "week", "4 to 26 weeks"
+    else:
+        freq_label, unit_label, lookback_hint = "daily", "trading-day", "5 to 63 trading days"
+
+    target_desc = (
+        f"Barra-residualized {horizon}-{unit_label} forward return (size, 12-1 momentum, "
+        "volatility, and sector tilts are ALREADY stripped out — do not rediscover simple "
+        "size, momentum, or low-vol factors)"
+        if residualize_returns
+        else f"{horizon}-{unit_label} forward return, computed after demeaning by sector"
+    )
+    priors = anomaly_priors_block(available_fields)
+    priors_section = f"\n{priors}\n" if priors else ""
+    return f"""You are a senior quantitative equity researcher. Generate {num_signals} stock selection signals.
 
 REQUEST: {request}
+{priors_section}
+OBJECTIVE: This is a {freq_label} panel (1 bar = 1 {unit_label}; choose TS_* lookbacks
+around {lookback_hint}). Each signal is ranked cross-sectionally every {unit_label} and
+scored by its Spearman (rank) IC against the {target_desc}. The deciding window is
+out-of-sample validation; the final holdout is hidden. Acceptance requires BOTH
+statistically significant IC AND a monotone, low-turnover long/short tail spread
+(top 15% vs bottom 15%) that clears 10 bps spread + market impact + 50 bps short borrow
++ JKP 6-factor alpha + Deflated Sharpe Ratio.
 {feedback_section}
-{format_data_fields_for_prompt()}
+{format_data_fields_for_prompt(available_fields)}
 
 OPERATORS:
 {operators_list}
@@ -211,7 +413,28 @@ STRICT RULES:
 - Do NOT invent operators or pass extra arguments to single-arg operators
   (e.g. `Rank(x)` takes ONE argument; write `Rank(Sub(a, b))`, never `Rank(a, b)`).
 - Use only the exact operator names shown above (case-sensitive).
-{example_section}
+- No look-ahead. Never use a negative shift, a future value, or a statistic
+  computed over a window that includes the scoring date. Every operator is
+  backward-looking; keep it that way.
+- Each of the {num_signals} signals must come from a DIFFERENT economic family
+  (momentum, reversal, volatility, liquidity/volume, quality, value, growth,
+  financing, accruals). Duplicates of the same idea with a different window are
+  wasted slots.
+- `Rank(x)` ranks each stock against its OWN history (time series); `CS_Rank(x)`
+  ranks across stocks on each date (cross-section). A cross-sectional value or
+  quality signal needs `CS_Rank`, not `Rank`.
+- Never divide by a cross-sectionally demeaned or ranked panel, e.g.
+  `Div(x, CS_Demean(y))`: the denominator crosses zero and the signal becomes
+  an outlier explosion. Demean AFTER forming a ratio, not before.
+- Prefer one economically interpretable ratio per signal over a stack of
+  operators. A signal the model cannot explain cannot be defended.
+- Prefer formulas that are not just a monotone rescaling of another signal:
+  the cross-sectional rank is all that matters, so adding a constant or
+  multiplying by a positive scalar changes nothing.
+- If a ratio is already a panel field (ROE, ROA, OperatingMargin, NetMargin,
+  RevenueGrowth, NetIncomeGrowth, DebtToEquity, LongTermDebtToEquity,
+  EquityToAssets, CashToAssets), use it directly instead of rebuilding it.
+{parents_section}{tried_section}{example_section}
 Fill in this exact template at the END of your reply (inside a ```json block):
 
 {template_block}
@@ -225,6 +448,12 @@ async def generate_signal_json(
     num_signals: int,
     operators: list[dict],
     feedback: str | None = None,
+    tried_formulas: list[str] | None = None,
+    horizon: int = 5,
+    available_fields: set[str] | None = None,
+    parent_signals: list[dict] | None = None,
+    periods_per_year: int = 252,
+    residualize_returns: bool = False,
 ) -> str:
     """
     Call the signal LLM and return its raw response text.
@@ -241,6 +470,12 @@ async def generate_signal_json(
         build_signal_template(num_signals, template),
         feedback,
         build_signal_example(template),
+        tried_formulas=tried_formulas,
+        horizon=horizon,
+        available_fields=available_fields,
+        parent_signals=parent_signals,
+        periods_per_year=periods_per_year,
+        residualize_returns=residualize_returns,
     )
 
     # Disable Nemotron's chain-of-thought trace so the entire token budget
