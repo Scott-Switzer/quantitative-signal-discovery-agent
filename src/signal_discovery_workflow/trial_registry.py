@@ -127,14 +127,28 @@ class TrialRegistry:
 
         if self.sharded:
             try:
-                entries = r2_store.list_entries(self._shard_dir())
-                for entry in entries:
-                    if not entry["name"].endswith(".jsonl"):
-                        continue
-                    try:
-                        trials.extend(_parse_jsonl(r2_store.read_text(entry["path"])))
-                    except Exception as e:
-                        logger.warning(f"Could not read shard {entry['path']}: {e}")
+                entries = [
+                    e for e in r2_store.list_entries(self._shard_dir())
+                    if str(e.get("name", "")).endswith(".jsonl")
+                ]
+                if entries:
+                    def _read_shard(entry: dict[str, Any]) -> list[dict[str, Any]]:
+                        try:
+                            return _parse_jsonl(r2_store.read_text(entry["path"]))
+                        except Exception as e:
+                            logger.warning(f"Could not read shard {entry['path']}: {e}")
+                            return []
+
+                    workers = max(1, min(12, len(entries)))
+                    if workers == 1:
+                        for entry in entries:
+                            trials.extend(_read_shard(entry))
+                    else:
+                        from concurrent.futures import ThreadPoolExecutor
+
+                        with ThreadPoolExecutor(max_workers=workers) as pool:
+                            for rows in pool.map(_read_shard, entries):
+                                trials.extend(rows)
             except Exception as e:
                 logger.warning(f"Could not list trial shards under {self._shard_dir()}: {e}")
 

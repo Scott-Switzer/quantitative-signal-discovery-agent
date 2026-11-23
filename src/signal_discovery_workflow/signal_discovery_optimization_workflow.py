@@ -1075,7 +1075,10 @@ async def signal_optimizer_function(config: SignalOptimizerConfig, builder: Buil
         )
 
     def _trial_key(meta: dict[str, Any]) -> str:
-        return f"{normalize_formula(meta.get('formula'))}|h={config.forward_periods}"
+        # Scope trial deduplication by frequency so weekly (52) and monthly (12)
+        # sleeves never collide on h=1, while preserving legacy monthly keys.
+        base = f"{normalize_formula(meta.get('formula'))}|h={config.forward_periods}"
+        return base if int(config.periods_per_year) == 12 else f"{base}|f={int(config.periods_per_year)}"
 
     async def generate_feedback(candidates: list[dict], iteration: int) -> str:
         """Ask the advisor for compact, actionable feedback using train/validation only.
@@ -1196,7 +1199,11 @@ different economic mechanism). No prose, no preamble. Format:
             else None
         )
         archived_parents = (
-            pool_library.top_parents(6, horizon=config.forward_periods)
+            pool_library.top_parents(
+                6,
+                horizon=config.forward_periods,
+                periods_per_year=config.periods_per_year,
+            )
             if pool_library is not None
             else []
         )
@@ -1428,8 +1435,9 @@ different economic mechanism). No prose, no preamble. Format:
                     "selected_on": ic.get("selected_on"),
                     "data_pin_policy": pin_policy,
                 }
+                # registry.record() already appends into registry._cache (which
+                # cached_trials aliases), so do NOT double-append here.
                 registry.record(trial)
-                cached_trials.append(trial)
                 trials_this_run.append(trial)
                 ledger_keys.add(key)
 
@@ -1527,6 +1535,7 @@ different economic mechanism). No prose, no preamble. Format:
                     alpha_pool.members,
                     run_id=request_text[:80],
                     horizon=config.forward_periods,
+                    periods_per_year=config.periods_per_year,
                 )
             except Exception as e:
                 logger.warning(f"Could not persist AlphaPool shard: {e}")

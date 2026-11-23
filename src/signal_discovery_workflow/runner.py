@@ -105,9 +105,10 @@ class DirectNIMChatClient:
                 choices = body.get("choices") or []
                 message = (choices[0].get("message") or {}) if choices else {}
                 content = message.get("content") or ""
-                return _SimpleMessage(
-                    content=str(content), additional_kwargs={"usage": body.get("usage")}
-                )
+                extra_kwargs: dict[str, Any] = {"usage": body.get("usage")}
+                if message.get("reasoning_content"):
+                    extra_kwargs["reasoning_content"] = str(message["reasoning_content"])
+                return _SimpleMessage(content=str(content), additional_kwargs=extra_kwargs)
             except urllib.error.HTTPError as exc:
                 last_exc = exc
                 if exc.code not in _RETRYABLE_HTTP_CODES or attempt >= self.max_retries:

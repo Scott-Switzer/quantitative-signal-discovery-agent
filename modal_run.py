@@ -363,7 +363,9 @@ def run_cross_run_meta_combiner(
     wf = yaml.safe_load((pathlib.Path(REMOTE_ROOT) / config_file).read_text())["workflow"]
     pool_uri = wf.get("alpha_pool_uri") or r2_store.join(RESULTS_URI, "alpha_pool")
     lib = AlphaPoolLibrary(pool_uri)
-    archived = lib.load_all(horizon=int(wf.get("forward_periods", 1)))
+    horizon = int(wf.get("forward_periods", 1))
+    ppy = int(wf.get("periods_per_year", 12))
+    archived = lib.load_all(horizon=horizon, periods_per_year=ppy)
     if len(archived) < 2:
         return {"status": "insufficient_pool_members", "archived_count": len(archived)}
 
@@ -372,9 +374,23 @@ def run_cross_run_meta_combiner(
     sector_map = bundle.get("sector_map") or None
     mask = bundle.get("universe_mask")
     close = panels["Close"]
-    fwd = bundle.get("residual_returns")
-    if fwd is None:
-        fwd = compute_forward_returns(close, periods=int(wf.get("forward_periods", 1)))
+    if horizon == 1 and wf.get("residualize_returns", True) and bundle.get("residual_returns") is not None:
+        fwd = bundle["residual_returns"]
+    else:
+        raw_fwd = compute_forward_returns(close, periods=horizon)
+        if wf.get("residualize_returns", True):
+            from signal_discovery_workflow.residualize import residualize_forward_returns
+
+            fwd = residualize_forward_returns(
+                raw_fwd,
+                close,
+                market_cap=panels.get("MarketCap"),
+                sector_map=sector_map if wf.get("sector_neutralize", True) else None,
+                periods_per_year=ppy,
+                min_names=max(int(wf.get("min_names", 100)), 30),
+            )
+        else:
+            fwd = raw_fwd
 
     ops = load_calculator_operators()
     code_map = get_operator_code_map(ops)
@@ -541,7 +557,8 @@ def fanout_discovery(
 
     has_lazy_prices = False
     try:
-        has_lazy_prices = r2_store.exists(DEFAULT_LAZY_PRICES_OUTPUT_URI)
+        # Require a real panel (>= 1,000 filing diffs), not a tiny 7-row stub.
+        has_lazy_prices = r2_store.parquet_rows(DEFAULT_LAZY_PRICES_OUTPUT_URI) >= 1000
     except Exception:
         has_lazy_prices = False
 

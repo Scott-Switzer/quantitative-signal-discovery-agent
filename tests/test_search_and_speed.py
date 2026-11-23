@@ -111,3 +111,43 @@ def test_weekly_vault_cap_and_phf_phase2_receipt_fields():
     assert receipt["checks"]["execution_realism"]["ok"] is True
     assert receipt["results_digest"]["signal_test"]["validation_dsr"] == 0.97
     assert results["headline"]["validation_subperiod_stability"] == 0.75
+
+
+def test_alpha_pool_library_separates_monthly_and_weekly_sleeves(tmp_path):
+    from signal_discovery_workflow.alpha_combiner import AlphaPoolLibrary
+
+    lib_m = AlphaPoolLibrary(tmp_path / "pool")
+    lib_m.save_members(
+        [{"name": "m_sig", "formula": "CS_Rank(FcfYield)", "direction": 1.0, "val_ic": 0.02}],
+        run_id="r_m",
+        horizon=1,
+        periods_per_year=12,
+    )
+    lib_w = AlphaPoolLibrary(tmp_path / "pool")
+    lib_w.save_members(
+        [{"name": "w_sig", "formula": "CS_Rank(AmihudIlliq)", "direction": 1.0, "val_ic": 0.018}],
+        run_id="r_w",
+        horizon=1,
+        periods_per_year=52,
+    )
+
+    monthly_only = lib_m.load_all(horizon=1, periods_per_year=12)
+    weekly_only = lib_w.load_all(horizon=1, periods_per_year=52)
+    assert [m["name"] for m in monthly_only] == ["m_sig"]
+    assert [m["name"] for m in weekly_only] == ["w_sig"]
+
+
+def test_trial_registry_no_double_append_and_parallel_shards(tmp_path):
+    from signal_discovery_workflow.trial_registry import TrialRegistry
+
+    r1 = TrialRegistry(tmp_path / "trials.jsonl", sharded=True)
+    cached = r1.load()
+    r1.record({"formula": "CS_Rank(FcfYield)", "mean_ic": 0.02, "p_value": 0.01})
+    assert len(cached) == 1  # record() mutates _cache in place; no duplicate
+
+    r2 = TrialRegistry(tmp_path / "trials.jsonl", sharded=True)
+    r2.record({"formula": "CS_Rank(EbitToEv)", "mean_ic": 0.025, "p_value": 0.005})
+
+    r3 = TrialRegistry(tmp_path / "trials.jsonl", sharded=True)
+    assert len(r3.load()) == 2
+

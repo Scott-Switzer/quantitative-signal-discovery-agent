@@ -370,7 +370,14 @@ class AlphaPoolLibrary:
         assert self.library_uri is not None
         return r2_store.join(self.library_uri, "shards")
 
-    def save_members(self, members: list[dict[str, Any]], *, run_id: str, horizon: int) -> str | None:
+    def save_members(
+        self,
+        members: list[dict[str, Any]],
+        *,
+        run_id: str,
+        horizon: int,
+        periods_per_year: int | None = None,
+    ) -> str | None:
         """Persist admitted pool member metadata as an immutable shard."""
         if not self.library_uri or not members:
             return None
@@ -381,6 +388,7 @@ class AlphaPoolLibrary:
                 "timestamp": now,
                 "run_id": run_id,
                 "horizon": int(horizon),
+                "periods_per_year": int(periods_per_year) if periods_per_year is not None else None,
                 "name": m.get("name"),
                 "formula": m.get("formula"),
                 "formula_key": normalize_formula(m.get("formula")),
@@ -397,23 +405,42 @@ class AlphaPoolLibrary:
         logger.info(f"Persisted {len(lines)} AlphaPool members to {shard_uri}")
         return shard_uri
 
-    def load_all(self, *, horizon: int | None = None) -> list[dict[str, Any]]:
-        """Load and deduplicate all persisted pool members across shards."""
+    def load_all(
+        self,
+        *,
+        horizon: int | None = None,
+        periods_per_year: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """Load and deduplicate all persisted pool members across shards concurrently."""
         if not self.library_uri:
             return []
         try:
-            entries = r2_store.list_entries(self._shards_prefix())
+            entries = [
+                e for e in r2_store.list_entries(self._shards_prefix())
+                if str(e.get("name", "")).endswith(".jsonl")
+            ]
         except Exception:
             return []
+        if not entries:
+            return []
+
+        def _read_text_safe(entry: dict[str, Any]) -> str:
+            try:
+                return r2_store.read_text(entry["path"])
+            except Exception:
+                return ""
+
+        workers = max(1, min(12, len(entries)))
+        if workers == 1:
+            texts = [_read_text_safe(e) for e in entries]
+        else:
+            from concurrent.futures import ThreadPoolExecutor
+
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                texts = list(pool.map(_read_text_safe, entries))
 
         by_key: dict[str, dict[str, Any]] = {}
-        for entry in entries:
-            if not str(entry.get("name", "")).endswith(".jsonl"):
-                continue
-            try:
-                text = r2_store.read_text(entry["path"])
-            except Exception:
-                continue
+        for text in texts:
             for line in text.splitlines():
                 line = line.strip()
                 if not line:
@@ -424,6 +451,12 @@ class AlphaPoolLibrary:
                     continue
                 if horizon is not None and rec.get("horizon") != int(horizon):
                     continue
+                if periods_per_year is not None:
+                    rec_freq = rec.get("periods_per_year")
+                    # Legacy shards without periods_per_year belong to the monthly (12) sleeve.
+                    effective_freq = int(rec_freq) if rec_freq is not None else 12
+                    if effective_freq != int(periods_per_year):
+                        continue
                 key = rec.get("formula_key") or normalize_formula(rec.get("formula"))
                 if not key:
                     continue
@@ -437,6 +470,12 @@ class AlphaPoolLibrary:
 
         return sorted(by_key.values(), key=_score, reverse=True)
 
-    def top_parents(self, n: int = 6, *, horizon: int | None = None) -> list[dict[str, Any]]:
+    def top_parents(
+        self,
+        n: int = 6,
+        *,
+        horizon: int | None = None,
+        periods_per_year: int | None = None,
+    ) -> list[dict[str, Any]]:
         """Return the top N archived parent signals for evolutionary mutation/crossover."""
-        return self.load_all(horizon=horizon)[: int(n)]
+        return self.load_all(horizon=horizon, periods_per_year=periods_per_year)[: int(n)]
