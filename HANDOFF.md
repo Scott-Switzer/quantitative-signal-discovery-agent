@@ -148,3 +148,18 @@ git add -A && git commit -m "Phase 2: R2 feature store, Form 4/13F alt-data, CCM
 3. **SHA-pinning non-CRSP releases:** Currently only `crsp-panel-1.2.2` is SHA-pinned; Lakehouse v2, FRED, SEC quarterly, and JKP factor releases are path-referenced. Pinning their manifests in `feature_store.py` metadata or config will tighten reproducibility.
 4. **Post-discovery shadow-book decay tracker:** Add a lightweight scheduled check in `personal-hedge-fund` or `modal_run.py` that tracks rolling out-of-sample IC and net Sharpe of promoted `AlphaPoolLibrary` signals to detect alpha decay early (aligned with [AlphaLab (2026)](https://arxiv.org/html/2604.08590v1) and [Event-MoE (2026)](https://aimspress.com/article/doi/10.3934/era.2026392?viewType=HTML) regime-monitoring practices).
 5. **Pre-existing notebook lint errors:** `notebooks/` contains pre-existing `ruff` failures unrelated to `src/`, `tests/`, or `modal_run.py` (ignored in Modal builds via `SOURCE_IGNORE`).
+
+## Chapman Value Line research inputs
+
+QSD can load `valueline__screener`, `valueline__reports`, and
+`valueline__history` with `signal_discovery_workflow.valueline.load_table(dataset_id)`.
+The catalog pins release `20261124T074240Z` in the private Chapman R2 bucket.
+The reader verifies the manifest and each Parquet part before returning an Arrow table.
+
+The screener has ranks but lacks source observation timestamps. The report and
+history tables have parsed report dates, including dates outside the plausible
+snapshot window (1986 to 2028 in the November 2026 extraction). Fiscal year and
+ingest timestamps do not establish point-in-time availability. Before a historical
+test, validate report dates against source PDFs, match identifiers as of each
+validated observation, and use only subsequent returns. Keep projection targets
+separate from realized fundamentals and returns.
