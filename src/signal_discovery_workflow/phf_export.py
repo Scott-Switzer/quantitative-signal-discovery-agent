@@ -191,3 +191,30 @@ def export_phf_run(
     r2_store.write_text(results_uri, json.dumps(results, indent=2, default=str))
     logger.info(f"Exported PHF research run to {run_dir}")
     return {"run_id": run_id, "receipt_uri": receipt_uri, "results_uri": results_uri}
+
+
+def export_qsd_ui_latest(
+    prefix_uri: str,
+    *,
+    survivors: list[dict[str, Any]],
+    n_trials_total: int,
+    selftest_summary: dict[str, Any] | None = None,
+    data_pins: dict[str, Any] | None = None,
+    provenance: dict[str, Any] | None = None,
+    generated_at: str | None = None,
+) -> str:
+    """Write compact ``ui_latest.json`` survivor ledger for ``terminal-v2`` Quant Lab."""
+    from . import governance
+
+    payload = governance.build_ui_latest_payload(
+        survivors,
+        n_trials_total=n_trials_total,
+        selftest_summary=selftest_summary,
+        data_pins=data_pins,
+        provenance=provenance,
+        generated_at=generated_at,
+    )
+    ui_uri = r2_store.join(prefix_uri, "ui_latest.json")
+    r2_store.write_text(ui_uri, json.dumps(payload, indent=2, default=str))
+    logger.info(f"Exported QSD Quant Lab survivor ledger to {ui_uri}")
+    return ui_uri
